@@ -25,6 +25,9 @@ import {
 import { AppLayout } from './components/Layout';
 import { ChatWidget } from './components/ChatWidget';
 import { Modal } from './components/Modal';
+import { CopyButton } from './components/CopyButton';
+import { ToastContainer, type ToastMessage } from './components/Toast';
+
 
 const DELETE_CONFIRM_TEXT = 'DELETE FARMHAND';
 const RELOAD_CONFIRM_TEXT = 'RELOAD WORLD';
@@ -99,6 +102,16 @@ export function DirectApp() {
   );
 
   const [includeDiagnostics, setIncludeDiagnostics] = useState(false);
+    const [toasts, setToasts] = useState<ToastMessage[]>([]);
+
+  const addToast = (message: string, type: 'success' | 'error' | 'info' = 'info') => {
+    const id = Math.random().toString(36).substring(2, 9);
+    setToasts(prev => [...prev, { id, type, message }]);
+  };
+
+  const removeToast = (id: string) => {
+    setToasts(prev => prev.filter(t => t.id !== id));
+  };
   const [error, setError] = useState<string | null>(null);
   const [actionMessage, setActionMessage] = useState<string | null>(null);
   const [busyAction, setBusyAction] = useState<string | null>(null);
@@ -176,7 +189,7 @@ export function DirectApp() {
       setError(null);
     } catch (reason) {
       setDashboard(createEmptyDashboard());
-      setError(reason instanceof Error ? reason.message : 'Failed to reach JunimoServer');
+      addToast(reason instanceof Error ? reason.message : 'Failed to reach JunimoServer', 'error');
     } finally {
       setLoading(false);
     }
@@ -189,7 +202,18 @@ export function DirectApp() {
     } else {
       setLoading(false);
     }
-  }, []);
+
+    const interval = setInterval(() => {
+      if (document.visibilityState === 'visible') {
+        const currentConnection = loadStoredConnection();
+        if (normalizeApiBaseUrl(currentConnection.apiBaseUrl)) {
+          refreshData(currentConnection, includeDiagnostics).catch(console.error);
+        }
+      }
+    }, 5000);
+
+    return () => clearInterval(interval);
+  }, [includeDiagnostics]);
 
   useEffect(() => {
     const normalizedBaseUrl = activeAssessment.normalizedBaseUrl;
@@ -447,8 +471,8 @@ export function DirectApp() {
         </button>
       }
     >
-      {error ? <div className="notice notice-error">{error}</div> : null}
-      {actionMessage ? <div className="notice notice-success">{actionMessage}</div> : null}
+      
+      
 
       {activeTab === 'settings' && (
         <div className="layout-constrained">
@@ -550,22 +574,6 @@ export function DirectApp() {
           <div className="column">
             <Panel title="Overview" subtitle="Snapshot-backed state and settings">
               <div className="overview-grid">
-                <div className="invite-card">
-                  <div>
-                    <span className="label">Invite Code</span>
-                    <span className="code">{dashboard.inviteCode.inviteCode ?? dashboard.inviteCode.error ?? 'Unavailable'}</span>
-                  </div>
-                  {dashboard.inviteCode.inviteCode && (
-                    <button 
-                      className="secondary-button" 
-                      onClick={() => navigator.clipboard.writeText(dashboard.inviteCode.inviteCode!)}
-                      title="Copy to clipboard"
-                    >
-                      📋 Copy
-                    </button>
-                  )}
-                </div>
-                
                 <div className="farm-tags">
                   <span className="farm-tag"><span className="tag-icon">🌾</span> {dashboard.status.farmName || 'Unnamed Farm'}</span>
                   <span className="farm-tag"><span className="tag-icon">🗺️</span> Type {dashboard.status.farmTypeKey || '-'}</span>
@@ -573,6 +581,16 @@ export function DirectApp() {
                   <span className="farm-tag"><span className="tag-icon">🔒</span> {dashboard.auth.enabled ? 'Auth Enabled' : 'No Auth'}</span>
                   <span className="farm-tag"><span className="tag-icon">🏠</span> Cabins: {dashboard.cabins.strategy || '-'}</span>
                   {dashboard.settings.server.separateWallets && <span className="farm-tag"><span className="tag-icon">💰</span> Separate Wallets</span>}
+                </div>
+                
+                <div className="invite-card">
+                  <div>
+                    <span className="label">Invite Code</span>
+                    <span className="code">{dashboard.inviteCode.inviteCode ?? dashboard.inviteCode.error ?? 'Unavailable'}</span>
+                  </div>
+                  {dashboard.inviteCode.inviteCode && (
+                    <CopyButton text={dashboard.inviteCode.inviteCode} />
+                  )}
                 </div>
               </div>
             </Panel>
@@ -859,6 +877,7 @@ export function DirectApp() {
         setMessage={setChatMessage}
         onSend={sendChat}
       />
+      <ToastContainer toasts={toasts} removeToast={removeToast} />
     </AppLayout>
   );
 }

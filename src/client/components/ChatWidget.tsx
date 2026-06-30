@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 
 export function ChatWidget(props: {
   connected: boolean;
@@ -12,7 +12,15 @@ export function ChatWidget(props: {
   error?: string | null;
 }) {
   const [expanded, setExpanded] = useState(false);
-  const unreadCount = expanded ? 0 : props.lines.length; // Simplified for now, should ideally track unread since last open
+  const [lastReadIndex, setLastReadIndex] = useState(props.lines.length);
+
+  useEffect(() => {
+    if (expanded) {
+      setLastReadIndex(props.lines.length);
+    }
+  }, [expanded, props.lines.length]);
+
+  const unreadCount = props.lines.length - lastReadIndex;
 
   if (!expanded) {
     return (

@@ -17,6 +17,10 @@ import type {
 import { AppLayout } from './components/Layout';
 import { ChatWidget } from './components/ChatWidget';
 import { Modal } from './components/Modal';
+import { CopyButton } from './components/CopyButton';
+import { ToastContainer, type ToastMessage } from './components/Toast';
+import { MapView } from './components/MapView';
+
 
 type SessionPayload = {
   authenticated: boolean;
@@ -133,6 +137,16 @@ export function App() {
   const [session, setSession] = useState<SessionPayload | null>(null);
   const [dashboard, setDashboard] = useState<DashboardPayload | null>(null);
   const [password, setPassword] = useState('');
+    const [toasts, setToasts] = useState<ToastMessage[]>([]);
+
+  const addToast = (message: string, type: 'success' | 'error' | 'info' = 'info') => {
+    const id = Math.random().toString(36).substring(2, 9);
+    setToasts(prev => [...prev, { id, type, message }]);
+  };
+
+  const removeToast = (id: string) => {
+    setToasts(prev => prev.filter(t => t.id !== id));
+  };
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [actionMessage, setActionMessage] = useState<string | null>(null);
@@ -203,9 +217,17 @@ export function App() {
 
   useEffect(() => {
     refreshData().catch((reason: unknown) => {
-      setError(reason instanceof Error ? reason.message : 'Failed to load');
+      addToast(reason instanceof Error ? reason.message : 'Failed to load', 'error');
       setLoading(false);
     });
+
+    const interval = setInterval(() => {
+      if (document.visibilityState === 'visible') {
+        refreshData().catch(console.error);
+      }
+    }, 5000);
+
+    return () => clearInterval(interval);
   }, []);
 
   useEffect(() => {
@@ -433,6 +455,7 @@ export function App() {
       onTabChange={setActiveTab}
       tabs={[
         { id: 'dashboard', label: 'Dashboard', icon: '📊' },
+        { id: 'screenshot', label: 'Screenshot', icon: '📷' },
         { id: 'map', label: 'Map View', icon: '🗺️' },
         { id: 'console', label: 'Console', icon: '💻' }
       ]}
@@ -446,7 +469,7 @@ export function App() {
             onClick={() => {
               setLoading(true);
               refreshData().catch((reason) => {
-                setError(reason instanceof Error ? reason.message : 'Refresh failed');
+                addToast(reason instanceof Error ? reason.message : 'Refresh failed', 'error');
                 setLoading(false);
               });
             }}
@@ -459,30 +482,14 @@ export function App() {
         </div>
       }
     >
-      {error ? <div className="notice notice-error">{error}</div> : null}
-      {actionMessage ? <div className="notice notice-success">{actionMessage}</div> : null}
+      
+      
 
       {activeTab === 'dashboard' && dashboard && (
         <div className="layout-grid">
           <div className="column">
             <Panel title="Overview" subtitle="Snapshot-backed state and settings">
               <div className="overview-grid">
-                <div className="invite-card">
-                  <div>
-                    <span className="label">Invite Code</span>
-                    <span className="code">{dashboard.inviteCode.inviteCode ?? dashboard.inviteCode.error ?? 'Unavailable'}</span>
-                  </div>
-                  {dashboard.inviteCode.inviteCode && (
-                    <button 
-                      className="secondary-button" 
-                      onClick={() => navigator.clipboard.writeText(dashboard.inviteCode.inviteCode!)}
-                      title="Copy to clipboard"
-                    >
-                      📋 Copy
-                    </button>
-                  )}
-                </div>
-                
                 <div className="farm-tags">
                   <span className="farm-tag"><span className="tag-icon">🌾</span> {dashboard.status.farmName || 'Unnamed Farm'}</span>
                   <span className="farm-tag"><span className="tag-icon">🗺️</span> Type {dashboard.status.farmTypeKey || '-'}</span>
@@ -490,6 +497,16 @@ export function App() {
                   <span className="farm-tag"><span className="tag-icon">🔒</span> {dashboard.auth.enabled ? 'Auth Enabled' : 'No Auth'}</span>
                   <span className="farm-tag"><span className="tag-icon">🏠</span> Cabins: {dashboard.cabins.strategy || '-'}</span>
                   {dashboard.settings.server.separateWallets && <span className="farm-tag"><span className="tag-icon">💰</span> Separate Wallets</span>}
+                </div>
+                
+                <div className="invite-card">
+                  <div>
+                    <span className="label">Invite Code</span>
+                    <span className="code">{dashboard.inviteCode.inviteCode ?? dashboard.inviteCode.error ?? 'Unavailable'}</span>
+                  </div>
+                  {dashboard.inviteCode.inviteCode && (
+                    <CopyButton text={dashboard.inviteCode.inviteCode} />
+                  )}
                 </div>
               </div>
             </Panel>
@@ -561,7 +578,7 @@ export function App() {
         </div>
       )}
 
-      {activeTab === 'map' && (
+      {activeTab === 'screenshot' && (
         <div className="layout-single">
           <Panel title="Live screenshot" subtitle="Fetched through the local secure proxy">
             {screenshotSrc ? (
@@ -570,6 +587,12 @@ export function App() {
               <div className="empty-state">Screenshot unavailable: {dashboard?.screenshot.error ?? 'No image data'}</div>
             )}
           </Panel>
+        </div>
+      )}
+
+      {activeTab === 'map' && (
+        <div className="layout-single" style={{ height: 'calc(100vh - 120px)' }}>
+          <MapView />
         </div>
       )}
 
@@ -769,6 +792,7 @@ export function App() {
         setMessage={setChatMessage}
         onSend={sendChat}
       />
+      <ToastContainer toasts={toasts} removeToast={removeToast} />
     </AppLayout>
   );
 }
