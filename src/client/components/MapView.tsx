@@ -51,51 +51,50 @@ export function MapView({ slotId }: MapViewProps) {
 
   // Asset loading logic
   const [assets, setAssets] = useState<{ [key: string]: HTMLImageElement }>({});
+  const [assetsLoaded, setAssetsLoaded] = useState(false);
 
-  // 3. Render map on canvas when farmData changes
   useEffect(() => {
-    if (!farmData || !canvasRef.current) return;
-
-    // Determine required images based on farmData
-    const requiredImages = new Set<string>([
+    const imagesToLoad = [
       'springobjects.png', 'Craftables.png', 'crops.png', 'flooring.png', 'hoeDirt.png',
       'houses.png', 'bushes.png', 'grass.png', 'fruitTrees.png',
       'tree1_spring.png', 'tree2_spring.png', 'tree3_spring.png',
+      'Barn.png', 'Big Barn.png', 'Deluxe Barn.png',
+      'Coop.png', 'Big Coop.png', 'Deluxe Coop.png',
+      'Log Cabin.png', 'Plank Cabin.png', 'Stone Cabin.png',
+      'Silo.png', 'Slime Hutch.png', 'Stable.png', 'Well.png', 'Mill.png', 'Shed.png',
+      'Fish Pond.png', 'Junimo Hut.png', 'Gold Clock.png', 'Shipping Bin.png',
+      'Earth Obelisk.png', 'Water Obelisk.png', 'Desert Obelisk.png',
+      'Island Obelisk.png',
       'Fence1.png', 'Fence2.png', 'Fence3.png', 'Fence5.png'
-    ]);
+    ];
+    const loadedImages: { [key: string]: HTMLImageElement } = {};
+    let loadedCount = 0;
 
-    farmData.buildings?.forEach(b => {
-      const type = b.buildingType || b.name;
-      if (type !== 'Farmhouse') {
-        requiredImages.add(`${type}.png`);
-      }
+    imagesToLoad.forEach(src => {
+      const img = new Image();
+      img.onload = () => {
+        loadedImages[src] = img;
+        loadedCount++;
+        if (loadedCount === imagesToLoad.length) {
+          setAssets(loadedImages);
+          setAssetsLoaded(true);
+        }
+      };
+      img.onerror = () => {
+        loadedCount++;
+        if (loadedCount === imagesToLoad.length) {
+          setAssets(loadedImages);
+          setAssetsLoaded(true);
+        }
+      };
+      // Fetch assets directly from the root /assets/ directory served by Vite/Caddy
+      img.src = `/assets/${src}`;
     });
+  }, []);
 
-    // Load any missing images
-    let newAssetsLoaded = false;
-    const currentAssets = { ...assets };
-
-    requiredImages.forEach(src => {
-      if (!currentAssets[src]) {
-        const img = new Image();
-        img.onload = () => {
-          setAssets(prev => ({ ...prev, [src]: img }));
-        };
-        img.onerror = () => {
-          // Mark as loaded (with a dummy or just tracking it) to avoid infinite loops,
-          // but we won't put a broken image in the assets map, or we can put a flag.
-          // For simplicity, we just won't add it to the map.
-        };
-        img.src = `/assets/${src}`;
-        // Temporarily put a placeholder to prevent re-fetching while it loads
-        currentAssets[src] = img;
-        newAssetsLoaded = true;
-      }
-    });
-
-    if (newAssetsLoaded) {
-      setAssets(currentAssets);
-    }
+  // 3. Render map on canvas when farmData changes
+  useEffect(() => {
+    if (!farmData || !canvasRef.current || !assetsLoaded) return;
 
     const canvas = canvasRef.current;
     const ctx = canvas.getContext('2d');
@@ -333,7 +332,7 @@ export function MapView({ slotId }: MapViewProps) {
       }
     }
 
-  }, [farmData, assets]);
+  }, [farmData, assetsLoaded, assets]);
 
   // Panning/Zooming handlers
   const handleWheel = (e: React.WheelEvent) => {
