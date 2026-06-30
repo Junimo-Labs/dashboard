@@ -61,9 +61,10 @@ export function MapView({ slotId }: MapViewProps) {
   useEffect(() => {
     async function loadSlots() {
       try {
-        // Assume App.tsx `api` function is exported or we rewrite it here.
-        // For simplicity we will fetch using fetch directly since we don't have access to App's api easily unless exported.
-        const res = await fetch('/api/saves'); // Proxy to upstream
+        const mapUrl = localStorage.getItem('junimo_map_api_url') || 'http://localhost:8080';
+        const res = await fetch('/api/map/saves', {
+          headers: { 'x-map-api-url': mapUrl }
+        }); // Proxy to upstream
         if (!res.ok) throw new Error('Failed to fetch saves');
         const data: SavesResponse = await res.json();
         const availableSlots = data.slots.map(s => s.slot);
@@ -87,7 +88,10 @@ export function MapView({ slotId }: MapViewProps) {
       setLoading(true);
       setError(null);
       try {
-        const res = await fetch(`/api/saves/${activeSlot}/farm`);
+        const mapUrl = localStorage.getItem('junimo_map_api_url') || 'http://localhost:8080';
+        const res = await fetch(`/api/map/saves/${activeSlot}/farm`, {
+          headers: { 'x-map-api-url': mapUrl }
+        });
         if (!res.ok) {
            throw new Error(`Failed to load farm data for ${activeSlot} (${res.status})`);
         }

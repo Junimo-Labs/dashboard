@@ -54,9 +54,11 @@ type AppConfigLegacy = {
   documentationUrl?: string;
   secureProxy?: boolean;
   baseUrlHint?: string;
+  defaultMapApiBaseUrl?: string;
 };
 
-const appConfig: AppConfigLegacy = {};
+// Assuming __JUNIMO_WEB_CONFIG__ is injected by the entrypoint.
+const appConfig: AppConfigLegacy = (window as any).__JUNIMO_WEB_CONFIG__ || {};
 
 async function api<T>(input: string, init?: RequestInit): Promise<T> {
   const response = await fetch(input, {
@@ -184,6 +186,7 @@ export function App() {
     newGameMaxPlayers: '8',
     newGameProfitMargin: '1',
     newGameSeparateWallets: false,
+    mapApiUrl: localStorage.getItem('junimo_map_api_url') || appConfig.defaultMapApiBaseUrl || 'http://localhost:8080'
   });
   const chatSocketRef = useRef<WebSocket | null>(null);
 
@@ -682,6 +685,24 @@ export function App() {
               <div className="settings-list">
                 <div className="settings-row">
                   <div className="settings-info">
+                    <h4>Map API Base URL</h4>
+                    <p>Where map requests will be proxied to (e.g. Map parser service)</p>
+                  </div>
+                  <div className="settings-action">
+                    <input
+                      value={forms.mapApiUrl}
+                      onChange={(event) => {
+                        updateForm('mapApiUrl', event.target.value);
+                        localStorage.setItem('junimo_map_api_url', event.target.value);
+                      }}
+                      placeholder="http://localhost:8080"
+                      style={{ width: '250px' }}
+                    />
+                  </div>
+                </div>
+
+                <div className="settings-row">
+                  <div className="settings-info">
                     <h4>Force refresh map caches</h4>
                     <p>Triggers upstream `/refresh` to re-parse all save slots.</p>
                   </div>
@@ -689,7 +710,10 @@ export function App() {
                     <button
                       className="secondary-button"
                       disabled={busyAction === 'Refresh maps'}
-                      onClick={() => runAction('Refresh maps', '/api/refresh', { method: 'POST' })}
+                      onClick={() => runAction('Refresh maps', '/api/map/refresh', {
+                        method: 'POST',
+                        headers: { 'x-map-api-url': forms.mapApiUrl }
+                      })}
                     >
                       {busyAction === 'Refresh maps' ? 'Working...' : 'Refresh All'}
                     </button>
