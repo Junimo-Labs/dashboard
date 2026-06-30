@@ -66,23 +66,20 @@ export function MapView({ slotId }: MapViewProps) {
       'Island Obelisk.png',
       'Fence1.png', 'Fence2.png', 'Fence3.png', 'Fence5.png'
     ];
-    const loadedImages: { [key: string]: HTMLImageElement } = {};
     let loadedCount = 0;
 
     imagesToLoad.forEach(src => {
       const img = new Image();
       img.onload = () => {
-        loadedImages[src] = img;
+        setAssets(prev => ({ ...prev, [src]: img }));
         loadedCount++;
         if (loadedCount === imagesToLoad.length) {
-          setAssets(loadedImages);
           setAssetsLoaded(true);
         }
       };
       img.onerror = () => {
         loadedCount++;
         if (loadedCount === imagesToLoad.length) {
-          setAssets(loadedImages);
           setAssetsLoaded(true);
         }
       };
