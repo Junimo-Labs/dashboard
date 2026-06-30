@@ -1263,3 +1263,17 @@ details.diagnostics-details > summary::before {
 details.diagnostics-details[open] > summary::before {
   transform: rotate(90deg);
 }
+
+/* Prevent wrapping inside tags */
+.farm-tag {
+  white-space: nowrap;
+}
+
+/* Constrained layout for single-column settings pages */
+.layout-constrained {
+  max-width: 900px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}

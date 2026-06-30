@@ -451,8 +451,7 @@ export function DirectApp() {
       {actionMessage ? <div className="notice notice-success">{actionMessage}</div> : null}
 
       {activeTab === 'settings' && (
-        <div className="layout-grid">
-          <div className="column" style={{ gridColumn: 'span 2' }}>
+        <div className="layout-constrained">
             <Panel
               title="Connection"
               subtitle="Runtime browser config. API key is session-only by default unless you explicitly choose to remember it."
@@ -543,7 +542,6 @@ export function DirectApp() {
                 />
               </div>
             </Panel>
-          </div>
         </div>
       )}
 
@@ -663,8 +661,7 @@ export function DirectApp() {
       )}
 
       {activeTab === 'console' && (
-        <div className="layout-grid">
-          <div className="column" style={{ gridColumn: 'span 2' }}>
+        <div className="layout-constrained">
             <Panel title="Server Configuration" subtitle="Runtime operations sent directly from the browser">
               <div className="settings-list">
                 <div className="settings-row">
@@ -778,7 +775,6 @@ export function DirectApp() {
                 </div>
               </div>
             </Panel>
-          </div>
         </div>
       )}
 

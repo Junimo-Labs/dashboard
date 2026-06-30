@@ -558,7 +558,6 @@ export function App() {
                 emptyText="No farmhand slots found"
               />
             </Panel>
-          </div>
         </div>
       )}
 
@@ -575,8 +574,7 @@ export function App() {
       )}
 
       {activeTab === 'console' && (
-        <div className="layout-grid">
-          <div className="column" style={{ gridColumn: 'span 2' }}>
+        <div className="layout-constrained">
             <Panel title="Server Configuration" subtitle="Low-risk runtime operations">
               <div className="settings-list">
                 <div className="settings-row">
@@ -690,7 +688,6 @@ export function App() {
                 </div>
               </div>
             </Panel>
-          </div>
         </div>
       )}
 
