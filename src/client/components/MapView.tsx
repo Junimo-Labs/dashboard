@@ -80,13 +80,14 @@ export function MapView({ slotId }: MapViewProps) {
         }
       };
       img.onerror = () => {
-        console.warn(`Failed to load asset: ${src}`);
+        // Prevent console spam if image isn't found, we have fallbacks.
         loadedCount++;
         if (loadedCount === imagesToLoad.length) {
           setAssets(loadedImages);
           setAssetsLoaded(true);
         }
       };
+      // Fetch assets directly from the root /assets/ directory served by Vite/Caddy
       img.src = `/assets/${src}`;
     });
   }, []);
@@ -313,11 +314,34 @@ export function MapView({ slotId }: MapViewProps) {
       drawSprite('bushes.png', size, t.x, t.y - (h-1), w, h, w * 16, h * 16);
     });
 
-    // Resource Clumps (Boulders, Large Stumps)
+    // Resource Clumps (Boulders, Large Stumps, Meteorites)
     farmData.resourceClumps?.forEach(r => {
-      // Hardcoded mapping for stumps/boulders based on width/height or parentSheetIndex
-      if (r.width === 2 && r.height === 2) {
-         drawSprite('springobjects.png', 732, r.x, r.y, 2, 2, 32, 32); // Large stump approx
+      // In Stardew:
+      // parentSheetIndex 600 = Large Stump (2x2)
+      // parentSheetIndex 672 = Large Log/Boulder (2x2)
+      // parentSheetIndex 732 = Meteorite (2x2)
+      // They are located in springobjects.png but they are 2x2 tiles (32x32 pixels) in the sprite sheet.
+      // So we don't use standard 16x16 index lookup. Instead we calculate pixel coordinates.
+
+      const type = r.parentSheetIndex || r.type; // type is sometimes used in place of parentSheetIndex
+      if (type) {
+        // SDV-Summary logic: Image.open(springobjects).crop((col*16, row*16, col*16+32, row*16+32))
+        // Since the clump is 32x32, it occupies 2x2 grid slots.
+        drawSprite('springobjects.png', type, r.x, r.y, r.width || 2, r.height || 2, 16, 16);
+        // Wait, drawSprite uses spriteWidth/Height for grid calculation. If we pass 16,16 it will use the top-left 16x16 of the item.
+        // Actually, SDV-Summary crops a 32x32 area starting at the standard index coordinates.
+        // Let's draw it directly to avoid drawSprite's limitations.
+        const img = assets['springobjects.png'];
+        if (img) {
+          const cols = Math.floor(img.width / 16);
+          const sx = (type % cols) * 16;
+          const sy = Math.floor(type / cols) * 16;
+          ctx.drawImage(
+            img,
+            sx, sy, 32, 32, // Source 32x32
+            r.x * TILE_SIZE, r.y * TILE_SIZE, (r.width || 2) * TILE_SIZE, (r.height || 2) * TILE_SIZE // Dest
+          );
+        }
       } else {
          drawTile(r.x, r.y, r.width || 2, r.height || 2, '#696969'); // Fallback
       }
@@ -334,32 +358,62 @@ export function MapView({ slotId }: MapViewProps) {
 
     // Buildings (using houses.png for Farmhouse, specific files for others)
     farmData.buildings?.forEach(b => {
-      if (b.buildingType === 'Farmhouse' || b.name === 'Farmhouse') {
-         drawSprite('houses.png', 0, b.x, b.y, b.width, b.height, 144, 144); // Approx size
+      const type = b.buildingType || b.name;
+      if (type === 'Farmhouse') {
+         // Farmhouse is handled separately below
+         return;
+      }
+
+      const buildingFile = `${type}.png`;
+      if (assets[buildingFile]) {
+        const img = assets[buildingFile];
+        // Most buildings have the visual size equal to the image size.
+        // However, some buildings (like Fish Pond) have different sizes.
+        // We draw the building aligning its bottom-left with the tile coordinate's bottom-left.
+        const drawW = img.width / 16;
+        const drawH = img.height / 16;
+        drawSprite(buildingFile, 0, b.x, b.y + (b.height || drawH) - drawH, drawW, drawH, img.width, img.height);
       } else {
-         const buildingFile = `${b.buildingType || b.name}.png`;
-         if (assets[buildingFile]) {
-            // Most building sprites have their actual dimensions in the png
-            const img = assets[buildingFile];
-            drawSprite(buildingFile, 0, b.x, b.y + b.height - (img.height / 16), img.width / 16, img.height / 16, img.width, img.height);
-         } else {
-            drawTile(b.x, b.y, b.width, b.height, '#b22222', b.buildingType || b.name);
-         }
+        drawTile(b.x, b.y, b.width || 5, b.height || 4, '#b22222', type);
       }
     });
 
     // Greenhouse
     if (farmData.greenhouse) {
       const { x, y, unlocked } = farmData.greenhouse;
-      drawTile(x, y, 7, 6, unlocked ? '#20b2aa' : '#778899', 'Greenhouse');
+      const img = assets['houses.png'];
+      if (img && unlocked) {
+        // SDV-Summary: houses.png, x=160, y=0, w=112, h=160.
+        // Since SDV-Summary crops (160, 0, 272, 160)
+        ctx.drawImage(
+          img,
+          160, 0, 112, 160, // Source
+          x * TILE_SIZE, (y - 4) * TILE_SIZE, 7 * TILE_SIZE, 10 * TILE_SIZE // Dest (Greenhouse is 7x6 logic, but visual is 7x10)
+        );
+      } else {
+        drawTile(x, y, 7, 6, unlocked ? '#20b2aa' : '#778899', 'Greenhouse');
+      }
     }
 
-    // House
-    if (farmData.house) {
-      const { x, y, width, height } = farmData.house;
-      // Draw using houses.png. The index depends on upgrade level (0, 1, 2)
-      // Usually houses are stacked horizontally or vertically in houses.png
-      drawSprite('houses.png', 0, x, y, width, height, 144, 144); // Simplified
+    // House / Farmhouse
+    const houseData = farmData.house || farmData.buildings?.find(b => b.buildingType === 'Farmhouse' || b.name === 'Farmhouse');
+    if (houseData) {
+      const { x, y, upgradeLevel = 0 } = houseData;
+      const img = assets['houses.png'];
+      if (img) {
+        // SDV-Summary logic:
+        // Index is upgrade level, capped at 2.
+        // Farmhouse is usually at column 0 in houses.png.
+        // Size: 160x144 (10x9 tiles).
+        const level = Math.min(upgradeLevel, 2);
+        ctx.drawImage(
+          img,
+          0, level * 144, 160, 144, // Source
+          x * TILE_SIZE, (y - 5) * TILE_SIZE, 10 * TILE_SIZE, 9 * TILE_SIZE // Dest (visual height is 9, logic might be less)
+        );
+      } else {
+        drawTile(x, y, 9, 6, '#cd5c5c', 'Farmhouse');
+      }
     }
 
   }, [farmData, assetsLoaded, assets]);

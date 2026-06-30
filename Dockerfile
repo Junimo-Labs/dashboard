@@ -15,6 +15,7 @@ RUN apk add --no-cache bash jq
 WORKDIR /srv
 
 COPY --from=build /app/dist/client /srv
+COPY unpacked /srv/assets
 COPY deploy/Caddyfile /etc/caddy/Caddyfile
 COPY deploy/docker-entrypoint.sh /usr/local/bin/junimo-web-entrypoint.sh
 
