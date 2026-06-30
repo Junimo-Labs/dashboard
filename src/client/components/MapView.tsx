@@ -54,7 +54,18 @@ export function MapView({ slotId }: MapViewProps) {
   const [assetsLoaded, setAssetsLoaded] = useState(false);
 
   useEffect(() => {
-    const imagesToLoad = ['springobjects.png', 'Craftables.png', 'crops.png', 'flooring.png', 'hoeDirt.png', 'houses.png'];
+    const imagesToLoad = [
+      'springobjects.png', 'Craftables.png', 'crops.png', 'flooring.png', 'hoeDirt.png',
+      'houses.png', 'bushes.png', 'grass.png', 'fruitTrees.png',
+      'tree1_spring.png', 'tree2_spring.png', 'tree3_spring.png',
+      'Barn.png', 'Big Barn.png', 'Deluxe Barn.png',
+      'Coop.png', 'Big Coop.png', 'Deluxe Coop.png',
+      'Log Cabin.png', 'Plank Cabin.png', 'Stone Cabin.png',
+      'Silo.png', 'Slime Hutch.png', 'Stable.png', 'Well.png', 'Mill.png', 'Shed.png',
+      'Fish Pond.png', 'Junimo Hut.png', 'Gold Clock.png', 'Shipping Bin.png',
+      'Earth Obelisk.png', 'Water Obelisk.png', 'Desert Obelisk.png',
+      'Fence1.png', 'Fence2.png', 'Fence3.png', 'Fence5.png'
+    ];
     const loadedImages: { [key: string]: HTMLImageElement } = {};
     let loadedCount = 0;
 
@@ -259,15 +270,36 @@ export function MapView({ slotId }: MapViewProps) {
 
     // Fences
     farmData.fences?.forEach(f => {
-      drawTile(f.x, f.y, 1, 1, '#8b4513'); // Keep fallback for now as fences need specific sprites
+      // Fences are complex to auto-tile. We'll just draw the base pillar.
+      let fenceFile = 'Fence1.png'; // Wood
+      if (f.isGate) fenceFile = 'Fence1.png'; // Simplify
+      else if (f.whichType === 2) fenceFile = 'Fence2.png'; // Stone
+      else if (f.whichType === 3) fenceFile = 'Fence3.png'; // Iron
+      else if (f.whichType === 5) fenceFile = 'Fence5.png'; // Hardwood
+
+      drawSprite(fenceFile, 5, f.x, f.y, 1, 2, 16, 32); // Using index 5 as a generic post
     });
 
     // Terrain Features (Trees, Grass)
     farmData.terrainFeatures?.forEach(t => {
-      if (t.name === 'Tree' || t.name === 'FruitTree') {
-        drawTile(t.x, t.y - 1, 1, 2, '#228b22'); // Fallback
+      if (t.name === 'Tree') {
+        const treeType = t.treeType || 1;
+        let treeFile = 'tree1_spring.png'; // Oak
+        if (treeType === 2) treeFile = 'tree2_spring.png'; // Maple
+        if (treeType === 3) treeFile = 'tree3_spring.png'; // Pine
+
+        const growthStage = t.growthStage || 5;
+        if (growthStage >= 5) {
+          // Full grown tree
+          drawSprite(treeFile, 0, t.x - 1, t.y - 3, 3, 4, 48, 64);
+        } else {
+          // Sapling/Seed (simplified)
+          drawSprite(treeFile, 26, t.x, t.y, 1, 1, 16, 16);
+        }
+      } else if (t.name === 'FruitTree') {
+        drawSprite('fruitTrees.png', 0, t.x - 1, t.y - 3, 3, 4, 48, 64); // Highly simplified
       } else if (t.name === 'Grass') {
-        drawTile(t.x, t.y, 1, 1, '#32cd32'); // Fallback
+        drawSprite('grass.png', 0, t.x, t.y, 1, 1, 16, 16);
       } else {
         drawTile(t.x, t.y, 1, 1, '#556b2f'); // Fallback
       }
@@ -275,14 +307,20 @@ export function MapView({ slotId }: MapViewProps) {
 
     // Large Terrain Features (Bushes)
     farmData.largeTerrainFeatures?.forEach(t => {
-      const w = t.size === 2 ? 2 : 1;
-      const h = t.size === 2 ? 2 : 1;
-      drawTile(t.x, t.y, w, h, '#006400'); // Fallback
+      const size = t.size || 1; // 0=small, 1=medium, 2=large
+      const w = size === 2 ? 3 : (size === 1 ? 2 : 1);
+      const h = size === 2 ? 3 : (size === 1 ? 2 : 1);
+      drawSprite('bushes.png', size, t.x, t.y - (h-1), w, h, w * 16, h * 16);
     });
 
     // Resource Clumps (Boulders, Large Stumps)
     farmData.resourceClumps?.forEach(r => {
-      drawTile(r.x, r.y, r.width || 2, r.height || 2, '#696969'); // Fallback
+      // Hardcoded mapping for stumps/boulders based on width/height or parentSheetIndex
+      if (r.width === 2 && r.height === 2) {
+         drawSprite('springobjects.png', 732, r.x, r.y, 2, 2, 32, 32); // Large stump approx
+      } else {
+         drawTile(r.x, r.y, r.width || 2, r.height || 2, '#696969'); // Fallback
+      }
     });
 
     // Objects (using springobjects.png and Craftables.png)
@@ -294,12 +332,19 @@ export function MapView({ slotId }: MapViewProps) {
       }
     });
 
-    // Buildings (using houses.png for Farmhouse, fallback for others)
+    // Buildings (using houses.png for Farmhouse, specific files for others)
     farmData.buildings?.forEach(b => {
       if (b.buildingType === 'Farmhouse' || b.name === 'Farmhouse') {
          drawSprite('houses.png', 0, b.x, b.y, b.width, b.height, 144, 144); // Approx size
       } else {
-         drawTile(b.x, b.y, b.width, b.height, '#b22222', b.buildingType || b.name);
+         const buildingFile = `${b.buildingType || b.name}.png`;
+         if (assets[buildingFile]) {
+            // Most building sprites have their actual dimensions in the png
+            const img = assets[buildingFile];
+            drawSprite(buildingFile, 0, b.x, b.y + b.height - (img.height / 16), img.width / 16, img.height / 16, img.width, img.height);
+         } else {
+            drawTile(b.x, b.y, b.width, b.height, '#b22222', b.buildingType || b.name);
+         }
       }
     });
 
