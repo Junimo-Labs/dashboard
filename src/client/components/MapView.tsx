@@ -62,11 +62,9 @@ export function MapView({ slotId }: MapViewProps) {
     async function loadSlots() {
       try {
         const mapUrl = localStorage.getItem('junimo_map_api_url') || 'http://localhost:8080';
-        const res = await fetch('/api/map/saves', {
+        const data = await api<SavesResponse>('/api/map/saves', {
           headers: { 'x-map-api-url': mapUrl }
-        }); // Proxy to upstream
-        if (!res.ok) throw new Error('Failed to fetch saves');
-        const data: SavesResponse = await res.json();
+        });
         const availableSlots = data.slots.map(s => s.slot);
         setSlots(availableSlots);
         if (!activeSlot && availableSlots.length > 0) {
@@ -89,13 +87,9 @@ export function MapView({ slotId }: MapViewProps) {
       setError(null);
       try {
         const mapUrl = localStorage.getItem('junimo_map_api_url') || 'http://localhost:8080';
-        const res = await fetch(`/api/map/saves/${activeSlot}/farm`, {
+        const data = await api<FarmResponse>(`/api/map/saves/${activeSlot}/farm`, {
           headers: { 'x-map-api-url': mapUrl }
         });
-        if (!res.ok) {
-           throw new Error(`Failed to load farm data for ${activeSlot} (${res.status})`);
-        }
-        const data: FarmResponse = await res.json();
         if (active) {
           setFarmData(data.data);
           // Center the map initially
