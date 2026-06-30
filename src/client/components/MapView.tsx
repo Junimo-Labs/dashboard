@@ -51,134 +51,51 @@ export function MapView({ slotId }: MapViewProps) {
 
   // Asset loading logic
   const [assets, setAssets] = useState<{ [key: string]: HTMLImageElement }>({});
-  const [assetsLoaded, setAssetsLoaded] = useState(false);
-
-  useEffect(() => {
-    const imagesToLoad = [
-      'springobjects.png', 'Craftables.png', 'crops.png', 'flooring.png', 'hoeDirt.png',
-      'houses.png', 'bushes.png', 'grass.png', 'fruitTrees.png',
-      'tree1_spring.png', 'tree2_spring.png', 'tree3_spring.png',
-      'Barn.png', 'Big Barn.png', 'Deluxe Barn.png',
-      'Coop.png', 'Big Coop.png', 'Deluxe Coop.png',
-      'Log Cabin.png', 'Plank Cabin.png', 'Stone Cabin.png',
-      'Silo.png', 'Slime Hutch.png', 'Stable.png', 'Well.png', 'Mill.png', 'Shed.png',
-      'Fish Pond.png', 'Junimo Hut.png', 'Gold Clock.png', 'Shipping Bin.png',
-      'Earth Obelisk.png', 'Water Obelisk.png', 'Desert Obelisk.png',
-      'Fence1.png', 'Fence2.png', 'Fence3.png', 'Fence5.png'
-    ];
-    const loadedImages: { [key: string]: HTMLImageElement } = {};
-    let loadedCount = 0;
-
-    imagesToLoad.forEach(src => {
-      const img = new Image();
-      img.onload = () => {
-        loadedImages[src] = img;
-        loadedCount++;
-        if (loadedCount === imagesToLoad.length) {
-          setAssets(loadedImages);
-          setAssetsLoaded(true);
-        }
-      };
-      img.onerror = () => {
-        // Prevent console spam if image isn't found, we have fallbacks.
-        loadedCount++;
-        if (loadedCount === imagesToLoad.length) {
-          setAssets(loadedImages);
-          setAssetsLoaded(true);
-        }
-      };
-      // Fetch assets directly from the root /assets/ directory served by Vite/Caddy
-      img.src = `/assets/${src}`;
-    });
-  }, []);
-
-  // For panning and zooming
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const containerRef = useRef<HTMLDivElement>(null);
-  const [scale, setScale] = useState(1);
-  const [offset, setOffset] = useState({ x: 0, y: 0 });
-  const [isDragging, setIsDragging] = useState(false);
-  const [dragStart, setDragStart] = useState({ x: 0, y: 0 });
-
-  // 1. Fetch available slots if no active slot is provided
-  useEffect(() => {
-    async function loadSlots() {
-      try {
-        const mapUrl = localStorage.getItem('junimo_map_api_url') || 'http://localhost:8080';
-
-        // Use direct fetch against the mapUrl since this component can be used in DirectApp.tsx
-        // where we don't have the Node.js proxy `/api/map/*` available.
-        const res = await fetch(`${mapUrl}/saves`, {
-          headers: { 'Accept': 'application/json' }
-        });
-        if (!res.ok) throw new Error('Failed to fetch saves');
-        const data: SavesResponse = await res.json();
-
-        const availableSlots = data.slots.map(s => s.slot);
-        setSlots(availableSlots);
-        if (!activeSlot && availableSlots.length > 0) {
-          setActiveSlot(availableSlots[0]);
-        }
-      } catch (e: any) {
-        setError(e.message || 'Error loading saves');
-      }
-    }
-    loadSlots();
-  }, [activeSlot]);
-
-  // 2. Fetch farm data when active slot changes
-  useEffect(() => {
-    if (!activeSlot) return;
-
-    let active = true;
-    async function loadFarm() {
-      setLoading(true);
-      setError(null);
-      try {
-        const mapUrl = localStorage.getItem('junimo_map_api_url') || 'http://localhost:8080';
-
-        const res = await fetch(`${mapUrl}/saves/${activeSlot}/farm`, {
-          headers: { 'Accept': 'application/json' }
-        });
-        if (!res.ok) {
-           throw new Error(`Failed to load farm data for ${activeSlot} (${res.status})`);
-        }
-        const data: FarmResponse = await res.json();
-
-        if (active) {
-          setFarmData(data.data);
-          // Center the map initially
-          if (containerRef.current) {
-            const cw = containerRef.current.clientWidth;
-            const ch = containerRef.current.clientHeight;
-            const mw = data.data.size.width * TILE_SIZE;
-            const mh = data.data.size.height * TILE_SIZE;
-            
-            // Fit to screen scale
-            const fitScale = Math.min(cw / mw, ch / mh) * 0.9;
-            setScale(Math.max(0.5, Math.min(fitScale, 2)));
-            
-            // Center offset
-            setOffset({
-              x: (cw - mw * fitScale) / 2,
-              y: (ch - mh * fitScale) / 2
-            });
-          }
-        }
-      } catch (e: any) {
-        if (active) setError(e.message || 'Error loading farm data');
-      } finally {
-        if (active) setLoading(false);
-      }
-    }
-
-    loadFarm();
-    return () => { active = false; };
-  }, [activeSlot]);
 
   // 3. Render map on canvas when farmData changes
   useEffect(() => {
     if (!farmData || !canvasRef.current) return;
+
+    // Determine required images based on farmData
+    const requiredImages = new Set<string>([
+      'springobjects.png', 'Craftables.png', 'crops.png', 'flooring.png', 'hoeDirt.png',
+      'houses.png', 'bushes.png', 'grass.png', 'fruitTrees.png',
+      'tree1_spring.png', 'tree2_spring.png', 'tree3_spring.png',
+      'Fence1.png', 'Fence2.png', 'Fence3.png', 'Fence5.png'
+    ]);
+
+    farmData.buildings?.forEach(b => {
+      const type = b.buildingType || b.name;
+      if (type !== 'Farmhouse') {
+        requiredImages.add(`${type}.png`);
+      }
+    });
+
+    // Load any missing images
+    let newAssetsLoaded = false;
+    const currentAssets = { ...assets };
+
+    requiredImages.forEach(src => {
+      if (!currentAssets[src]) {
+        const img = new Image();
+        img.onload = () => {
+          setAssets(prev => ({ ...prev, [src]: img }));
+        };
+        img.onerror = () => {
+          // Mark as loaded (with a dummy or just tracking it) to avoid infinite loops,
+          // but we won't put a broken image in the assets map, or we can put a flag.
+          // For simplicity, we just won't add it to the map.
+        };
+        img.src = `/assets/${src}`;
+        // Temporarily put a placeholder to prevent re-fetching while it loads
+        currentAssets[src] = img;
+        newAssetsLoaded = true;
+      }
+    });
+
+    if (newAssetsLoaded) {
+      setAssets(currentAssets);
+    }
 
     const canvas = canvasRef.current;
     const ctx = canvas.getContext('2d');
@@ -416,7 +333,7 @@ export function MapView({ slotId }: MapViewProps) {
       }
     }
 
-  }, [farmData, assetsLoaded, assets]);
+  }, [farmData, assets]);
 
   // Panning/Zooming handlers
   const handleWheel = (e: React.WheelEvent) => {
