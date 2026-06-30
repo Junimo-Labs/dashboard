@@ -29,6 +29,8 @@ import { CopyButton } from './components/CopyButton';
 import { ToastContainer, type ToastMessage } from './components/Toast';
 
 
+import { MapView } from './components/MapView';
+
 const DELETE_CONFIRM_TEXT = 'DELETE FARMHAND';
 const RELOAD_CONFIRM_TEXT = 'RELOAD WORLD';
 const NEW_GAME_CONFIRM_TEXT = 'CREATE NEW GAME';
@@ -452,6 +454,7 @@ export function DirectApp() {
       onTabChange={setActiveTab}
       tabs={[
         { id: 'dashboard', label: 'Dashboard', icon: '📊' },
+        { id: 'screenshot', label: 'Screenshot', icon: '📷' },
         { id: 'map', label: 'Map View', icon: '🗺️' },
         { id: 'console', label: 'Console', icon: '💻' },
         { id: 'settings', label: 'Settings', icon: '⚙️' }
@@ -670,7 +673,7 @@ export function DirectApp() {
         </div>
       )}
 
-      {activeTab === 'map' && (
+      {activeTab === 'screenshot' && (
         <div className="layout-single">
           <Panel
             title="Live screenshot"
@@ -684,6 +687,12 @@ export function DirectApp() {
               </div>
             )}
           </Panel>
+        </div>
+      )}
+
+      {activeTab === 'map' && (
+        <div className="layout-single" style={{ height: 'calc(100vh - 120px)' }}>
+          <MapView />
         </div>
       )}
 
