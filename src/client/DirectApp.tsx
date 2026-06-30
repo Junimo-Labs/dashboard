@@ -149,6 +149,7 @@ export function DirectApp() {
     newGameMaxPlayers: '8',
     newGameProfitMargin: '1',
     newGameSeparateWallets: false,
+    mapApiUrl: localStorage.getItem('junimo_map_api_url') || runtimeConfig.defaultMapApiBaseUrl || 'http://localhost:8080'
   });
   const chatSocketRef = useRef<WebSocket | null>(null);
 
@@ -566,6 +567,35 @@ export function DirectApp() {
                     'Direct mode keeps deployment simple because the container only serves static assets.',
                     'WebSocket chat can still work cross-origin because auth happens in-band after connect.',
                   ]}
+                />
+              </div>
+            </Panel>
+
+            <Panel
+              title="Map Data"
+              subtitle="Configure where map requests will be sent in direct mode"
+            >
+              <div className="connection-grid">
+                <label className="connection-field connection-field-wide">
+                  <span>Map API base URL</span>
+                  <input
+                    value={forms.mapApiUrl}
+                    onChange={(event) => {
+                      updateForm('mapApiUrl', event.target.value);
+                      localStorage.setItem('junimo_map_api_url', event.target.value);
+                    }}
+                    placeholder={
+                      runtimeConfig.defaultMapApiBaseUrl
+                        ? `Default: ${runtimeConfig.defaultMapApiBaseUrl}`
+                        : 'http://localhost:8080'
+                    }
+                  />
+                </label>
+              </div>
+              <div className="connection-summary">
+                <InfoChip
+                  label="Refresh maps"
+                  value="Not supported in direct mode"
                 />
               </div>
             </Panel>
