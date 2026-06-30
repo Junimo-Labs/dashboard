@@ -190,8 +190,13 @@ async function fetchJunimoJson<T>(
   pathname: string,
   init: RequestInit,
   parser: z.ZodType<T>,
+  useMapBaseUrl = false
 ): Promise<T> {
-  const url = new URL(pathname, config.JUNIMO_BASE_URL);
+  const baseUrl = useMapBaseUrl && config.JUNIMO_MAP_BASE_URL
+    ? config.JUNIMO_MAP_BASE_URL
+    : config.JUNIMO_BASE_URL;
+
+  const url = new URL(pathname, baseUrl);
   const response = await fetch(url, {
     ...init,
     headers: {
@@ -432,6 +437,44 @@ app.get('/api/read/:key', async (request, reply) => {
     .parse(request.params);
   const endpoint = readEndpoints[params.key];
   const data = await fetchJunimoJson<unknown>(endpoint.path, { method: 'GET' }, endpoint.parser as z.ZodType<unknown>);
+  reply.send(data);
+});
+
+app.get('/api/saves', async (request, reply) => {
+  const session = requireSession(request, reply);
+  if (!session) {
+    return;
+  }
+  const data = await fetchJunimoJson('/saves', { method: 'GET' }, z.any(), true);
+  reply.send(data);
+});
+
+app.get('/api/saves/:slot/farm', async (request, reply) => {
+  const session = requireSession(request, reply);
+  if (!session) {
+    return;
+  }
+  const params = z.object({ slot: z.string() }).parse(request.params);
+  const data = await fetchJunimoJson(`/saves/${encodeURIComponent(params.slot)}/farm`, { method: 'GET' }, z.any(), true);
+  reply.send(data);
+});
+
+app.post('/api/saves/:slot/refresh', async (request, reply) => {
+  const session = await requireAuthenticatedMutation(request, reply);
+  if (!session) {
+    return;
+  }
+  const params = z.object({ slot: z.string() }).parse(request.params);
+  const data = await fetchJunimoJson(`/saves/${encodeURIComponent(params.slot)}/refresh`, { method: 'POST' }, z.any(), true);
+  reply.send(data);
+});
+
+app.post('/api/refresh', async (request, reply) => {
+  const session = await requireAuthenticatedMutation(request, reply);
+  if (!session) {
+    return;
+  }
+  const data = await fetchJunimoJson('/refresh', { method: 'POST' }, z.any(), true);
   reply.send(data);
 });
 

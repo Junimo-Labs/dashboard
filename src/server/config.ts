@@ -7,6 +7,7 @@ const configSchema = z.object({
   HOST: z.string().default('0.0.0.0'),
   APP_BASE_URL: z.string().url().optional().default('http://localhost:3000'),
   JUNIMO_BASE_URL: z.string().url(),
+  JUNIMO_MAP_BASE_URL: z.string().url().optional(), // Optional fallback to JUNIMO_BASE_URL
   JUNIMO_API_KEY: z.string().min(1),
   ADMIN_PASSWORD: z.string().min(12),
   SESSION_SECRET: z.string().min(32).optional(),

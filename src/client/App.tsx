@@ -678,6 +678,26 @@ export function App() {
               </div>
             </Panel>
 
+            <Panel title="Map Data" subtitle="Manage cached map parses">
+              <div className="settings-list">
+                <div className="settings-row">
+                  <div className="settings-info">
+                    <h4>Force refresh map caches</h4>
+                    <p>Triggers upstream `/refresh` to re-parse all save slots.</p>
+                  </div>
+                  <div className="settings-action">
+                    <button
+                      className="secondary-button"
+                      disabled={busyAction === 'Refresh maps'}
+                      onClick={() => runAction('Refresh maps', '/api/refresh', { method: 'POST' })}
+                    >
+                      {busyAction === 'Refresh maps' ? 'Working...' : 'Refresh All'}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </Panel>
+
             <Panel title="Danger Zone" subtitle="Destructive or disruptive operations">
               <div className="settings-list">
                 <div className="settings-row">
