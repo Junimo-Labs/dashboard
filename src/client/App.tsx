@@ -578,6 +578,7 @@ export function App() {
                 emptyText="No farmhand slots found"
               />
             </Panel>
+          </div>
         </div>
       )}
 

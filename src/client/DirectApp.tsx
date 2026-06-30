@@ -149,7 +149,7 @@ export function DirectApp() {
     newGameMaxPlayers: '8',
     newGameProfitMargin: '1',
     newGameSeparateWallets: false,
-    mapApiUrl: localStorage.getItem('junimo_map_api_url') || runtimeConfig.defaultMapApiBaseUrl || 'http://localhost:8080'
+    mapApiUrl: localStorage.getItem('junimo_map_api_url') || 'http://localhost:8080'
   });
   const chatSocketRef = useRef<WebSocket | null>(null);
 
@@ -585,8 +585,8 @@ export function DirectApp() {
                       localStorage.setItem('junimo_map_api_url', event.target.value);
                     }}
                     placeholder={
-                      runtimeConfig.defaultMapApiBaseUrl
-                        ? `Default: ${runtimeConfig.defaultMapApiBaseUrl}`
+                      runtimeConfig.defaultApiBaseUrl
+                        ? `Default: ${runtimeConfig.defaultApiBaseUrl}`
                         : 'http://localhost:8080'
                     }
                   />

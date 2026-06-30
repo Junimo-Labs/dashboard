@@ -1,5 +1,4 @@
-import React, { useEffect, useState, useRef, useMemo } from 'react';
-import { api } from '../App';
+import React, { useEffect, useState, useRef } from 'react';
 
 export interface MapViewProps {
   slotId?: string; // Optional slot to load specific farm.
@@ -91,6 +90,88 @@ export function MapView({ slotId }: MapViewProps) {
       img.src = `/assets/${src}`;
     });
   }, []);
+
+  // For panning and zooming
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [scale, setScale] = useState(1);
+  const [offset, setOffset] = useState({ x: 0, y: 0 });
+  const [isDragging, setIsDragging] = useState(false);
+  const [dragStart, setDragStart] = useState({ x: 0, y: 0 });
+
+  // 1. Fetch available slots if no active slot is provided
+  useEffect(() => {
+    async function loadSlots() {
+      try {
+        const mapUrl = localStorage.getItem('junimo_map_api_url') || 'http://localhost:8080';
+
+        const res = await fetch(`${mapUrl}/saves`, {
+          headers: { 'Accept': 'application/json' }
+        });
+        if (!res.ok) throw new Error('Failed to fetch saves');
+        const data: SavesResponse = await res.json();
+
+        const availableSlots = data.slots.map(s => s.slot);
+        setSlots(availableSlots);
+        if (!activeSlot && availableSlots.length > 0) {
+          setActiveSlot(availableSlots[0]);
+        }
+      } catch (e: any) {
+        setError(e.message || 'Error loading saves');
+      }
+    }
+    loadSlots();
+  }, [activeSlot]);
+
+  // 2. Fetch farm data when active slot changes
+  useEffect(() => {
+    if (!activeSlot) return;
+
+    let active = true;
+    async function loadFarm() {
+      setLoading(true);
+      setError(null);
+      try {
+        const mapUrl = localStorage.getItem('junimo_map_api_url') || 'http://localhost:8080';
+
+        const res = await fetch(`${mapUrl}/saves/${activeSlot}/farm`, {
+          headers: { 'Accept': 'application/json' }
+        });
+        if (!res.ok) {
+           throw new Error(`Failed to load farm data for ${activeSlot} (${res.status})`);
+        }
+        const data: FarmResponse = await res.json();
+
+        if (active) {
+          setFarmData(data.data);
+          // Center the map initially
+          if (containerRef.current) {
+            const cw = containerRef.current.clientWidth;
+            const ch = containerRef.current.clientHeight;
+            const mw = data.data.size.width * TILE_SIZE;
+            const mh = data.data.size.height * TILE_SIZE;
+
+            // Fit to screen scale
+            const fitScale = Math.min(cw / mw, ch / mh) * 0.9;
+            setScale(Math.max(0.5, Math.min(fitScale, 2)));
+
+            // Center offset
+            setOffset({
+              x: (cw - mw * fitScale) / 2,
+              y: (ch - mh * fitScale) / 2
+            });
+          }
+        }
+      } catch (e: any) {
+        if (active) setError(e.message || 'Error loading farm data');
+      } finally {
+        if (active) setLoading(false);
+      }
+    }
+
+    loadFarm();
+    return () => { active = false; };
+  }, [activeSlot]);
 
   // 3. Render map on canvas when farmData changes
   useEffect(() => {
