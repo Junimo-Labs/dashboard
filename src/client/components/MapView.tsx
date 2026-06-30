@@ -49,6 +49,37 @@ export function MapView({ slotId }: MapViewProps) {
   const [activeSlot, setActiveSlot] = useState<string | null>(slotId || null);
   const [farmData, setFarmData] = useState<FarmData | null>(null);
 
+  // Asset loading logic
+  const [assets, setAssets] = useState<{ [key: string]: HTMLImageElement }>({});
+  const [assetsLoaded, setAssetsLoaded] = useState(false);
+
+  useEffect(() => {
+    const imagesToLoad = ['springobjects.png', 'Craftables.png', 'crops.png', 'flooring.png', 'hoeDirt.png', 'houses.png'];
+    const loadedImages: { [key: string]: HTMLImageElement } = {};
+    let loadedCount = 0;
+
+    imagesToLoad.forEach(src => {
+      const img = new Image();
+      img.onload = () => {
+        loadedImages[src] = img;
+        loadedCount++;
+        if (loadedCount === imagesToLoad.length) {
+          setAssets(loadedImages);
+          setAssetsLoaded(true);
+        }
+      };
+      img.onerror = () => {
+        console.warn(`Failed to load asset: ${src}`);
+        loadedCount++;
+        if (loadedCount === imagesToLoad.length) {
+          setAssets(loadedImages);
+          setAssetsLoaded(true);
+        }
+      };
+      img.src = `/assets/${src}`;
+    });
+  }, []);
+
   // For panning and zooming
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -161,13 +192,13 @@ export function MapView({ slotId }: MapViewProps) {
       ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(width, y); ctx.stroke();
     }
 
-    // Helper to draw a colored rectangle for a tile
+    // Helper to draw a colored rectangle for a tile (fallback)
     const drawTile = (x: number, y: number, w: number, h: number, color: string, label?: string) => {
       ctx.fillStyle = color;
       ctx.fillRect(x * TILE_SIZE, y * TILE_SIZE, w * TILE_SIZE, h * TILE_SIZE);
       ctx.strokeStyle = 'rgba(0,0,0,0.3)';
       ctx.strokeRect(x * TILE_SIZE, y * TILE_SIZE, w * TILE_SIZE, h * TILE_SIZE);
-      
+
       if (label) {
         ctx.fillStyle = '#fff';
         ctx.font = '10px monospace';
@@ -177,81 +208,116 @@ export function MapView({ slotId }: MapViewProps) {
       }
     };
 
+    // Helper to draw a sprite from a sprite sheet
+    const drawSprite = (
+      sheet: string,
+      spriteIndex: number,
+      x: number,
+      y: number,
+      w: number = 1,
+      h: number = 1,
+      spriteWidth: number = 16,
+      spriteHeight: number = 16
+    ) => {
+      const img = assets[sheet];
+      if (!img) return;
+
+      const cols = Math.floor(img.width / spriteWidth);
+      const sx = (spriteIndex % cols) * spriteWidth;
+      const sy = Math.floor(spriteIndex / cols) * spriteHeight;
+
+      ctx.drawImage(
+        img,
+        sx, sy, spriteWidth, spriteHeight, // Source
+        x * TILE_SIZE, y * TILE_SIZE, w * TILE_SIZE, h * TILE_SIZE // Destination
+      );
+    };
+
     // Render layers (bottom to top)
 
-    // Flooring
+    // Flooring (using flooring.png)
     farmData.flooring?.forEach(f => {
-      drawTile(f.x, f.y, 1, 1, '#a0a0a0'); // Gray for flooring
+      // In Stardew, flooring index usually maps to specific auto-tiled textures.
+      // We'll just draw the base tile for the index for now.
+      const index = f.index || 0;
+      drawSprite('flooring.png', index, f.x, f.y, 1, 1, 64, 64); // Flooring tiles are often 64x64 or auto-tiled
     });
 
-    // HoeDirt
+    // HoeDirt (using hoeDirt.png)
     farmData.hoeDirt?.forEach(h => {
-      drawTile(h.x, h.y, 1, 1, '#654321'); // Brown for tilled dirt
+      // Simplification: draw base hoe dirt
+      drawSprite('hoeDirt.png', 0, h.x, h.y, 1, 1, 16, 16);
     });
 
-    // Crops
+    // Crops (using crops.png)
     farmData.crops?.forEach(c => {
-      drawTile(c.x, c.y, 1, 1, '#2ecc71'); // Green for crops
+      const row = c.rowInSpriteSheet || 0;
+      const phase = c.currentPhase || 0;
+      const index = row * 8 + phase; // Crops sheet is typically 8 wide per crop type
+      drawSprite('crops.png', index, c.x, c.y, 1, 2, 16, 32);
     });
 
     // Fences
     farmData.fences?.forEach(f => {
-      drawTile(f.x, f.y, 1, 1, '#8b4513'); // Wood brown for fences
+      drawTile(f.x, f.y, 1, 1, '#8b4513'); // Keep fallback for now as fences need specific sprites
     });
 
     // Terrain Features (Trees, Grass)
     farmData.terrainFeatures?.forEach(t => {
       if (t.name === 'Tree' || t.name === 'FruitTree') {
-        drawTile(t.x, t.y - 1, 1, 2, '#228b22'); // Forest green
+        drawTile(t.x, t.y - 1, 1, 2, '#228b22'); // Fallback
       } else if (t.name === 'Grass') {
-        drawTile(t.x, t.y, 1, 1, '#32cd32'); // Lime green
+        drawTile(t.x, t.y, 1, 1, '#32cd32'); // Fallback
       } else {
-        drawTile(t.x, t.y, 1, 1, '#556b2f'); // Olive green
+        drawTile(t.x, t.y, 1, 1, '#556b2f'); // Fallback
       }
     });
 
     // Large Terrain Features (Bushes)
     farmData.largeTerrainFeatures?.forEach(t => {
-      const size = t.size || 1; // Default to 1x1 if unknown, usually larger
-      // Bush sizes vary, approx 2x2 for large
       const w = t.size === 2 ? 2 : 1;
       const h = t.size === 2 ? 2 : 1;
-      drawTile(t.x, t.y, w, h, '#006400'); // Dark green
+      drawTile(t.x, t.y, w, h, '#006400'); // Fallback
     });
 
     // Resource Clumps (Boulders, Large Stumps)
     farmData.resourceClumps?.forEach(r => {
-      drawTile(r.x, r.y, r.width || 2, r.height || 2, '#696969'); // Dim gray
+      drawTile(r.x, r.y, r.width || 2, r.height || 2, '#696969'); // Fallback
     });
 
-    // Objects (Chests, Scarecrows, etc)
+    // Objects (using springobjects.png and Craftables.png)
     farmData.objects?.forEach(o => {
-      // Draw chests a specific color if tinted
-      if (o.name === 'Chest' && o.tint) {
-         drawTile(o.x, o.y, 1, 1, `rgb(${o.tint.rgb[0]},${o.tint.rgb[1]},${o.tint.rgb[2]})`);
+      if (o.bigCraftable) {
+        drawSprite('Craftables.png', o.parentSheetIndex, o.x, o.y - 1, 1, 2, 16, 32); // Craftables are 16x32
       } else {
-         drawTile(o.x, o.y, 1, 1, '#d2b48c'); // Tan
+        drawSprite('springobjects.png', o.parentSheetIndex, o.x, o.y, 1, 1, 16, 16); // Springobjects are 16x16
       }
     });
 
-    // Buildings
+    // Buildings (using houses.png for Farmhouse, fallback for others)
     farmData.buildings?.forEach(b => {
-      drawTile(b.x, b.y, b.width, b.height, '#b22222', b.buildingType || b.name); // Firebrick
+      if (b.buildingType === 'Farmhouse' || b.name === 'Farmhouse') {
+         drawSprite('houses.png', 0, b.x, b.y, b.width, b.height, 144, 144); // Approx size
+      } else {
+         drawTile(b.x, b.y, b.width, b.height, '#b22222', b.buildingType || b.name);
+      }
     });
 
     // Greenhouse
     if (farmData.greenhouse) {
       const { x, y, unlocked } = farmData.greenhouse;
-      drawTile(x, y, 7, 6, unlocked ? '#20b2aa' : '#778899', 'Greenhouse'); // Light sea green vs slate gray
+      drawTile(x, y, 7, 6, unlocked ? '#20b2aa' : '#778899', 'Greenhouse');
     }
 
     // House
     if (farmData.house) {
       const { x, y, width, height } = farmData.house;
-      drawTile(x, y, width, height, '#cd5c5c', 'Farmhouse'); // Indian red
+      // Draw using houses.png. The index depends on upgrade level (0, 1, 2)
+      // Usually houses are stacked horizontally or vertically in houses.png
+      drawSprite('houses.png', 0, x, y, width, height, 144, 144); // Simplified
     }
 
-  }, [farmData]);
+  }, [farmData, assetsLoaded, assets]);
 
   // Panning/Zooming handlers
   const handleWheel = (e: React.WheelEvent) => {
