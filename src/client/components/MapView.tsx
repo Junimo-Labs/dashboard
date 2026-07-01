@@ -1,14 +1,89 @@
-import React, { useEffect, useState, useRef } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+
+/**
+ * MapView renders a Stardew Valley farm to a canvas by porting the sprite logic
+ * of SDV-Summary (https://github.com/Sketchy502/SDV-Summary) `generateFarm`.
+ *
+ * The upstream Junimo-Api `/saves/{slot}/farm` endpoint is itself adapted from
+ * SDV-Summary's `getFarmInfo`, so the JSON we receive maps almost 1:1 onto the
+ * original renderer. Server-side we already get the per-tile `orientation` for
+ * auto-tiled features (fences / flooring / hoe dirt), so the client only has to
+ * crop sprites and composite them in the correct draw order.
+ */
 
 export interface MapViewProps {
-  slotId?: string; // Optional slot to load specific farm.
+  slotId?: string;
 }
 
-interface Tile {
+type Season = 'spring' | 'summer' | 'fall' | 'winter';
+const SEASONS: Season[] = ['spring', 'summer', 'fall', 'winter'];
+
+const TILE = 16; // pixels per in-game tile
+const MAP_API_KEY = 'junimo_map_api_url';
+const DEFAULT_MAP_API = 'http://localhost:8080';
+
+// ---------------------------------------------------------------------------
+// Data contract (mirrors Junimo-Api/app/parser/farm.py)
+// ---------------------------------------------------------------------------
+
+interface BaseTile {
   name: string;
   x: number;
   y: number;
-  [key: string]: any; // Allows other fields dynamically based on object type
+  flipped?: boolean;
+}
+
+interface FenceTile extends BaseTile {
+  index: number;
+  type: number; // 1 wood, 2 stone, 3 iron, 5 hardwood
+  isGate?: boolean;
+  orientation: number;
+}
+
+interface FloorTile extends BaseTile {
+  type: number;
+  orientation: number;
+}
+
+interface CropTile extends BaseTile {
+  rowInSpriteSheet: number;
+  currentPhase: number;
+  dead?: boolean;
+  tint?: { rgb: number[]; daysOfCurrentPhase: number } | null;
+}
+
+interface TerrainTile extends BaseTile {
+  treeType?: number;
+  growthStage?: number;
+  grassType?: number;
+  numberOfWeeds?: number;
+  size?: number;
+}
+
+interface LargeTerrainTile extends BaseTile {
+  size: number;
+  tileSheetOffset: number;
+}
+
+interface ClumpTile extends BaseTile {
+  width: number;
+  height: number;
+  parentSheetIndex: number;
+}
+
+interface ObjectTile extends BaseTile {
+  displayName: string;
+  index: number;
+  type: string;
+  extra: string | { name: string; tint: number[] };
+}
+
+interface BuildingTile extends BaseTile {
+  buildingType: string;
+  width: number;
+  height: number;
+  upgradeLevel?: number;
+  fishPond?: { nettingStyle: number; waterColor: number[]; hasOutput: boolean };
 }
 
 interface FarmData {
@@ -17,551 +92,987 @@ interface FarmData {
   size: { width: number; height: number };
   house: { x: number; y: number; width: number; height: number; upgradeLevel: number };
   greenhouse: { x: number; y: number; unlocked: boolean };
-  buildings: Tile[];
-  objects: Tile[];
-  fences: Tile[];
-  flooring: Tile[];
-  hoeDirt: Tile[];
-  crops: Tile[];
-  terrainFeatures: Tile[];
-  largeTerrainFeatures: Tile[];
-  resourceClumps: Tile[];
+  buildings: BuildingTile[];
+  objects: ObjectTile[];
+  fences: FenceTile[];
+  flooring: FloorTile[];
+  hoeDirt: FloorTile[];
+  crops: CropTile[];
+  terrainFeatures: TerrainTile[];
+  largeTerrainFeatures: LargeTerrainTile[];
+  resourceClumps: ClumpTile[];
 }
 
 interface FarmResponse {
   slot: string;
-  source_mtime: number;
-  parsed_at: number;
   data: FarmData;
+}
+
+interface SummaryResponse {
+  data?: { summary?: { currentSeason?: string } | null } | null;
 }
 
 interface SavesResponse {
   slots: { slot: string }[];
 }
 
-const TILE_SIZE = 16; // pixels per Stardew tile
+// ---------------------------------------------------------------------------
+// Sprite-sheet helpers (port of SDV-Summary tools.cropImg)
+// ---------------------------------------------------------------------------
+
+interface SpriteRect {
+  sx: number;
+  sy: number;
+  sw: number;
+  sh: number;
+}
+
+/**
+ * cropImg semantics: the sprite `index` is decomposed on a grid of `defaultW`
+ * cells, but the crop itself spans `objW`x`objH`. This is what lets a 16x32
+ * sprite be indexed on a 16x16 grid.
+ */
+function spriteRect(
+  sheetWidth: number,
+  index: number,
+  defaultW: number,
+  defaultH: number,
+  objW: number,
+  objH: number,
+): SpriteRect {
+  const cols = Math.max(1, Math.floor(sheetWidth / defaultW));
+  return {
+    sx: (index % cols) * defaultW,
+    sy: Math.floor(index / cols) * defaultH,
+    sw: objW,
+    sh: objH,
+  };
+}
+
+function blit(
+  ctx: CanvasRenderingContext2D,
+  src: CanvasImageSource,
+  r: SpriteRect,
+  dx: number,
+  dy: number,
+  flip = false,
+) {
+  if (!flip) {
+    ctx.drawImage(src, r.sx, r.sy, r.sw, r.sh, dx, dy, r.sw, r.sh);
+    return;
+  }
+  ctx.save();
+  ctx.translate(dx + r.sw, dy);
+  ctx.scale(-1, 1);
+  ctx.drawImage(src, r.sx, r.sy, r.sw, r.sh, 0, 0, r.sw, r.sh);
+  ctx.restore();
+}
+
+/** Mirrors PIL colorize(grayscale(img), black, tint): luminance scaled to tint. */
+function tintSprite(src: CanvasImageSource, rect: SpriteRect, tint: number[]): HTMLCanvasElement {
+  const off = document.createElement('canvas');
+  off.width = rect.sw;
+  off.height = rect.sh;
+  const octx = off.getContext('2d')!;
+  octx.drawImage(src, rect.sx, rect.sy, rect.sw, rect.sh, 0, 0, rect.sw, rect.sh);
+  const data = octx.getImageData(0, 0, rect.sw, rect.sh);
+  const [tr, tg, tb] = tint;
+  for (let i = 0; i < data.data.length; i += 4) {
+    const gray =
+      (data.data[i] * 299 + data.data[i + 1] * 587 + data.data[i + 2] * 114) / 1000;
+    const f = gray / 255;
+    data.data[i] = Math.round(tr * f);
+    data.data[i + 1] = Math.round(tg * f);
+    data.data[i + 2] = Math.round(tb * f);
+  }
+  octx.putImageData(data, 0, 0);
+  return off;
+}
+
+// Deterministic PRNG so grass tufts render identically every pass.
+function makeRng(seed: number) {
+  let s = seed >>> 0;
+  return () => {
+    s = (s + 0x6d2b79f5) | 0;
+    let t = Math.imul(s ^ (s >>> 15), 1 | s);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+const randInt = (rng: () => number, a: number, b: number) => a + Math.floor(rng() * (b - a + 1));
+
+const CRAFTABLE_BLACKLIST = new Set([
+  'Twig',
+  'Stone',
+  'Weeds',
+  'Torch',
+  'Sprinkler',
+  'Quality Sprinkler',
+  'Iridium Sprinkler',
+  'Note Block',
+  'Jack-O-Lantern',
+]);
+
+const TREE_FILES: Record<number, (s: Season) => string> = {
+  1: (s) => `tree1_${s}.png`,
+  2: (s) => `tree2_${s}.png`,
+  3: (s) => (s === 'summer' ? 'tree3_spring.png' : `tree3_${s}.png`),
+  7: () => 'mushroom_tree.png',
+};
+
+function mapBackground(mapType: string, season: Season): string {
+  if (season === 'winter') return '#dfe6ec';
+  if (season === 'fall') return '#b9863f';
+  if (mapType === 'Beach') return '#d9c08a';
+  if (mapType === 'Riverland') return '#6aa9c9';
+  if (season === 'summer') return '#7cab3f';
+  return '#6f9e43';
+}
+
+// ---------------------------------------------------------------------------
+// Component
+// ---------------------------------------------------------------------------
 
 export function MapView({ slotId }: MapViewProps) {
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
   const [slots, setSlots] = useState<string[]>([]);
-  const [activeSlot, setActiveSlot] = useState<string | null>(slotId || null);
+  const [activeSlot, setActiveSlot] = useState<string | null>(slotId ?? null);
   const [farmData, setFarmData] = useState<FarmData | null>(null);
+  const [season, setSeason] = useState<Season>('spring');
+  const [autoSeason, setAutoSeason] = useState(true);
+  const [showGrid, setShowGrid] = useState(false);
 
-  // Asset loading logic
-  const [assets, setAssets] = useState<{ [key: string]: HTMLImageElement }>({});
-  const [assetsLoaded, setAssetsLoaded] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    const imagesToLoad = [
-      'springobjects.png', 'Craftables.png', 'crops.png', 'flooring.png', 'hoeDirt.png',
-      'houses.png', 'bushes.png', 'grass.png', 'fruitTrees.png',
-      'tree1_spring.png', 'tree2_spring.png', 'tree3_spring.png',
-      'Barn.png', 'Big Barn.png', 'Deluxe Barn.png',
-      'Coop.png', 'Big Coop.png', 'Deluxe Coop.png',
-      'Log Cabin.png', 'Plank Cabin.png', 'Stone Cabin.png',
-      'Silo.png', 'Slime Hutch.png', 'Stable.png', 'Well.png', 'Mill.png', 'Shed.png',
-      'Fish Pond.png', 'Junimo Hut.png', 'Gold Clock.png', 'Shipping Bin.png',
-      'Earth Obelisk.png', 'Water Obelisk.png', 'Desert Obelisk.png',
-      'Island Obelisk.png',
-      'Fence1.png', 'Fence2.png', 'Fence3.png', 'Fence5.png'
-    ];
-    let loadedCount = 0;
-
-    imagesToLoad.forEach(src => {
-      const img = new Image();
-      img.onload = () => {
-        setAssets(prev => ({ ...prev, [src]: img }));
-        loadedCount++;
-        if (loadedCount === imagesToLoad.length) {
-          setAssetsLoaded(true);
-        }
-      };
-      img.onerror = () => {
-        loadedCount++;
-        if (loadedCount === imagesToLoad.length) {
-          setAssetsLoaded(true);
-        }
-      };
-      // Fetch assets directly from the root /assets/ directory served by Vite/Caddy
-      img.src = `/assets/${src}`;
-    });
-  }, []);
-
-  // For panning and zooming
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const containerRef = useRef<HTMLDivElement>(null);
+  // View transform
   const [scale, setScale] = useState(1);
   const [offset, setOffset] = useState({ x: 0, y: 0 });
+  const dragRef = useRef<{ x: number; y: number; active: boolean }>({ x: 0, y: 0, active: false });
   const [isDragging, setIsDragging] = useState(false);
-  const [dragStart, setDragStart] = useState({ x: 0, y: 0 });
 
-  // 1. Fetch available slots if no active slot is provided
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  // On-demand asset cache; loading a new sheet bumps assetVersion to re-render.
+  const assetCache = useRef<Map<string, HTMLImageElement | null>>(new Map());
+  const [assetVersion, setAssetVersion] = useState(0);
+
+  const getImg = useCallback((file: string): HTMLImageElement | null => {
+    const cache = assetCache.current;
+    if (cache.has(file)) return cache.get(file) ?? null;
+    cache.set(file, null);
+    const img = new Image();
+    img.onload = () => {
+      cache.set(file, img);
+      setAssetVersion((v) => v + 1);
+    };
+    img.onerror = () => {
+      cache.set(file, null);
+    };
+    img.src = `/assets/${encodeURIComponent(file)}`;
+    return null;
+  }, []);
+
+  const mapApiUrl = () => localStorage.getItem(MAP_API_KEY) || DEFAULT_MAP_API;
+
+  const fitToScreen = useCallback(() => {
+    const container = containerRef.current;
+    const canvas = canvasRef.current;
+    if (!container || !canvas) return;
+    const cw = container.clientWidth;
+    const ch = container.clientHeight;
+    const mw = canvas.width;
+    const mh = canvas.height;
+    if (!mw || !mh) return;
+    const fit = Math.min(cw / mw, ch / mh) * 0.94;
+    const next = Math.max(0.2, Math.min(fit, 4));
+    setScale(next);
+    setOffset({ x: (cw - mw * next) / 2, y: (ch - mh * next) / 2 });
+  }, []);
+
+  // 1. Load slot list
   useEffect(() => {
-    async function loadSlots() {
+    let alive = true;
+    (async () => {
       try {
-        const mapUrl = localStorage.getItem('junimo_map_api_url') || 'http://localhost:8080';
-
-        const res = await fetch(`${mapUrl}/saves`, {
-          headers: { 'Accept': 'application/json' }
-        });
-        if (!res.ok) throw new Error('Failed to fetch saves');
+        const res = await fetch(`${mapApiUrl()}/saves`, { headers: { Accept: 'application/json' } });
+        if (!res.ok) throw new Error(`Failed to list saves (${res.status})`);
         const data: SavesResponse = await res.json();
-
-        const availableSlots = data.slots.map(s => s.slot);
-        setSlots(availableSlots);
-        if (!activeSlot && availableSlots.length > 0) {
-          setActiveSlot(availableSlots[0]);
-        }
-      } catch (e: any) {
-        setError(e.message || 'Error loading saves');
+        if (!alive) return;
+        const available = data.slots.map((s) => s.slot);
+        setSlots(available);
+        setActiveSlot((cur) => cur ?? available[0] ?? null);
+      } catch (e) {
+        if (alive) setError(e instanceof Error ? e.message : 'Error loading saves');
       }
-    }
-    loadSlots();
-  }, [activeSlot]);
+    })();
+    return () => {
+      alive = false;
+    };
+  }, []);
 
-  // 2. Fetch farm data when active slot changes
+  // 2. Load farm + season for the active slot
   useEffect(() => {
     if (!activeSlot) return;
-
-    let active = true;
-    async function loadFarm() {
+    let alive = true;
+    (async () => {
       setLoading(true);
       setError(null);
       try {
-        const mapUrl = localStorage.getItem('junimo_map_api_url') || 'http://localhost:8080';
+        const base = mapApiUrl();
+        const [farmRes, summaryRes] = await Promise.all([
+          fetch(`${base}/saves/${activeSlot}/farm`, { headers: { Accept: 'application/json' } }),
+          fetch(`${base}/saves/${activeSlot}`, { headers: { Accept: 'application/json' } }).catch(
+            () => null,
+          ),
+        ]);
+        if (!farmRes.ok) throw new Error(`Failed to load farm for ${activeSlot} (${farmRes.status})`);
+        const farm: FarmResponse = await farmRes.json();
+        if (!alive) return;
+        setFarmData(farm.data);
 
-        const res = await fetch(`${mapUrl}/saves/${activeSlot}/farm`, {
-          headers: { 'Accept': 'application/json' }
-        });
-        if (!res.ok) {
-           throw new Error(`Failed to load farm data for ${activeSlot} (${res.status})`);
-        }
-        const data: FarmResponse = await res.json();
-
-        if (active) {
-          setFarmData(data.data);
-          // Center the map initially
-          if (containerRef.current) {
-            const cw = containerRef.current.clientWidth;
-            const ch = containerRef.current.clientHeight;
-            const mw = data.data.size.width * TILE_SIZE;
-            const mh = data.data.size.height * TILE_SIZE;
-
-            // Fit to screen scale
-            const fitScale = Math.min(cw / mw, ch / mh) * 0.9;
-            setScale(Math.max(0.5, Math.min(fitScale, 2)));
-
-            // Center offset
-            setOffset({
-              x: (cw - mw * fitScale) / 2,
-              y: (ch - mh * fitScale) / 2
-            });
+        if (summaryRes && summaryRes.ok) {
+          try {
+            const summary: SummaryResponse = await summaryRes.json();
+            const s = summary.data?.summary?.currentSeason?.toLowerCase();
+            if (alive && autoSeason && s && (SEASONS as string[]).includes(s)) {
+              setSeason(s as Season);
+            }
+          } catch {
+            /* season is optional */
           }
         }
-      } catch (e: any) {
-        if (active) setError(e.message || 'Error loading farm data');
+      } catch (e) {
+        if (alive) setError(e instanceof Error ? e.message : 'Error loading farm data');
       } finally {
-        if (active) setLoading(false);
+        if (alive) setLoading(false);
       }
-    }
-
-    loadFarm();
-    return () => { active = false; };
+    })();
+    return () => {
+      alive = false;
+    };
+    // autoSeason intentionally excluded: toggling it shouldn't refetch.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeSlot]);
 
-  // 3. Render map on canvas when farmData changes
+  // Fit once a new farm is rendered to a sized canvas.
   useEffect(() => {
-    if (!farmData || !canvasRef.current || !assetsLoaded) return;
+    if (farmData) {
+      // defer so the canvas has its dimensions set by the render effect
+      requestAnimationFrame(fitToScreen);
+    }
+  }, [farmData, fitToScreen]);
 
+  // 3. Render
+  useEffect(() => {
     const canvas = canvasRef.current;
+    if (!canvas || !farmData) return;
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    // Set canvas logical size to match the farm grid
-    const width = farmData.size.width * TILE_SIZE;
-    const height = farmData.size.height * TILE_SIZE;
+    const width = farmData.size.width * TILE;
+    const height = farmData.size.height * TILE;
     canvas.width = width;
     canvas.height = height;
+    ctx.imageSmoothingEnabled = false;
 
-    // Draw background (basic grass/dirt representation based on map type)
-    ctx.fillStyle = getMapBackgroundColor(farmData.mapType);
+    // Background
+    ctx.fillStyle = mapBackground(farmData.mapType, season);
     ctx.fillRect(0, 0, width, height);
 
-    // Draw grid
-    ctx.strokeStyle = 'rgba(0, 0, 0, 0.1)';
-    ctx.lineWidth = 1;
-    for (let x = 0; x <= width; x += TILE_SIZE) {
-      ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, height); ctx.stroke();
+    if (showGrid) {
+      ctx.strokeStyle = 'rgba(0,0,0,0.08)';
+      ctx.lineWidth = 1;
+      for (let x = 0; x <= width; x += TILE) {
+        ctx.beginPath();
+        ctx.moveTo(x + 0.5, 0);
+        ctx.lineTo(x + 0.5, height);
+        ctx.stroke();
+      }
+      for (let y = 0; y <= height; y += TILE) {
+        ctx.beginPath();
+        ctx.moveTo(0, y + 0.5);
+        ctx.lineTo(width, y + 0.5);
+        ctx.stroke();
+      }
     }
-    for (let y = 0; y <= height; y += TILE_SIZE) {
-      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(width, y); ctx.stroke();
-    }
 
-    // Helper to draw a colored rectangle for a tile (fallback)
-    const drawTile = (x: number, y: number, w: number, h: number, color: string, label?: string) => {
-      ctx.fillStyle = color;
-      ctx.fillRect(x * TILE_SIZE, y * TILE_SIZE, w * TILE_SIZE, h * TILE_SIZE);
-      ctx.strokeStyle = 'rgba(0,0,0,0.3)';
-      ctx.strokeRect(x * TILE_SIZE, y * TILE_SIZE, w * TILE_SIZE, h * TILE_SIZE);
+    const rng = makeRng(0);
+    const gates: FenceTile[] = [];
 
-      if (label) {
-        ctx.fillStyle = '#fff';
-        ctx.font = '10px monospace';
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillText(label, (x + w/2) * TILE_SIZE, (y + h/2) * TILE_SIZE);
-      }
-    };
-
-    // Helper to draw a sprite from a sprite sheet
-    const drawSprite = (
-      sheet: string,
-      spriteIndex: number,
-      x: number,
-      y: number,
-      w: number = 1,
-      h: number = 1,
-      spriteWidth: number = 16,
-      spriteHeight: number = 16
-    ) => {
-      const img = assets[sheet];
-      if (!img) return;
-
-      const cols = Math.floor(img.width / spriteWidth);
-      const sx = (spriteIndex % cols) * spriteWidth;
-      const sy = Math.floor(spriteIndex / cols) * spriteHeight;
-
-      ctx.drawImage(
-        img,
-        sx, sy, spriteWidth, spriteHeight, // Source
-        x * TILE_SIZE, y * TILE_SIZE, w * TILE_SIZE, h * TILE_SIZE // Destination
-      );
-    };
-
-    // Render layers (bottom to top)
-
-    // Flooring (using flooring.png)
-    farmData.flooring?.forEach(f => {
-      // In Stardew, flooring index usually maps to specific auto-tiled textures.
-      // We'll just draw the base tile for the index for now.
-      const index = f.index || 0;
-      drawSprite('flooring.png', index, f.x, f.y, 1, 1, 64, 64); // Flooring tiles are often 64x64 or auto-tiled
-    });
-
-    // HoeDirt (using hoeDirt.png)
-    farmData.hoeDirt?.forEach(h => {
-      // Simplification: draw base hoe dirt
-      drawSprite('hoeDirt.png', 0, h.x, h.y, 1, 1, 16, 16);
-    });
-
-    // Crops (using crops.png)
-    farmData.crops?.forEach(c => {
-      const row = c.rowInSpriteSheet || 0;
-      const phase = c.currentPhase || 0;
-      const index = row * 8 + phase; // Crops sheet is typically 8 wide per crop type
-      drawSprite('crops.png', index, c.x, c.y, 1, 2, 16, 32);
-    });
-
-    // Fences
-    farmData.fences?.forEach(f => {
-      // Fences are complex to auto-tile. We'll just draw the base pillar.
-      let fenceFile = 'Fence1.png'; // Wood
-      if (f.isGate) fenceFile = 'Fence1.png'; // Simplify
-      else if (f.whichType === 2) fenceFile = 'Fence2.png'; // Stone
-      else if (f.whichType === 3) fenceFile = 'Fence3.png'; // Iron
-      else if (f.whichType === 5) fenceFile = 'Fence5.png'; // Hardwood
-
-      drawSprite(fenceFile, 5, f.x, f.y, 1, 2, 16, 32); // Using index 5 as a generic post
-    });
-
-    // Terrain Features (Trees, Grass)
-    farmData.terrainFeatures?.forEach(t => {
-      if (t.name === 'Tree') {
-        const treeType = t.treeType || 1;
-        let treeFile = 'tree1_spring.png'; // Oak
-        if (treeType === 2) treeFile = 'tree2_spring.png'; // Maple
-        if (treeType === 3) treeFile = 'tree3_spring.png'; // Pine
-
-        const growthStage = t.growthStage || 5;
-        if (growthStage >= 5) {
-          // Full grown tree
-          drawSprite(treeFile, 0, t.x - 1, t.y - 3, 3, 4, 48, 64);
-        } else {
-          // Sapling/Seed (simplified)
-          drawSprite(treeFile, 26, t.x, t.y, 1, 1, 16, 16);
-        }
-      } else if (t.name === 'FruitTree') {
-        drawSprite('fruitTrees.png', 0, t.x - 1, t.y - 3, 3, 4, 48, 64); // Highly simplified
-      } else if (t.name === 'Grass') {
-        drawSprite('grass.png', 0, t.x, t.y, 1, 1, 16, 16);
-      } else {
-        drawTile(t.x, t.y, 1, 1, '#556b2f'); // Fallback
-      }
-    });
-
-    // Large Terrain Features (Bushes)
-    farmData.largeTerrainFeatures?.forEach(t => {
-      const size = t.size || 1; // 0=small, 1=medium, 2=large
-      const w = size === 2 ? 3 : (size === 1 ? 2 : 1);
-      const h = size === 2 ? 3 : (size === 1 ? 2 : 1);
-      drawSprite('bushes.png', size, t.x, t.y - (h-1), w, h, w * 16, h * 16);
-    });
-
-    // Resource Clumps (Boulders, Large Stumps, Meteorites)
-    farmData.resourceClumps?.forEach(r => {
-      // In Stardew:
-      // parentSheetIndex 600 = Large Stump (2x2)
-      // parentSheetIndex 672 = Large Log/Boulder (2x2)
-      // parentSheetIndex 732 = Meteorite (2x2)
-      // They are located in springobjects.png but they are 2x2 tiles (32x32 pixels) in the sprite sheet.
-      // So we don't use standard 16x16 index lookup. Instead we calculate pixel coordinates.
-
-      const type = r.parentSheetIndex || r.type; // type is sometimes used in place of parentSheetIndex
-      if (type) {
-        // SDV-Summary logic: Image.open(springobjects).crop((col*16, row*16, col*16+32, row*16+32))
-        // Since the clump is 32x32, it occupies 2x2 grid slots.
-        drawSprite('springobjects.png', type, r.x, r.y, r.width || 2, r.height || 2, 16, 16);
-        // Wait, drawSprite uses spriteWidth/Height for grid calculation. If we pass 16,16 it will use the top-left 16x16 of the item.
-        // Actually, SDV-Summary crops a 32x32 area starting at the standard index coordinates.
-        // Let's draw it directly to avoid drawSprite's limitations.
-        const img = assets['springobjects.png'];
-        if (img) {
-          const cols = Math.floor(img.width / 16);
-          const sx = (type % cols) * 16;
-          const sy = Math.floor(type / cols) * 16;
-          ctx.drawImage(
-            img,
-            sx, sy, 32, 32, // Source 32x32
-            r.x * TILE_SIZE, r.y * TILE_SIZE, (r.width || 2) * TILE_SIZE, (r.height || 2) * TILE_SIZE // Dest
-          );
-        }
-      } else {
-         drawTile(r.x, r.y, r.width || 2, r.height || 2, '#696969'); // Fallback
-      }
-    });
-
-    // Objects (using springobjects.png and Craftables.png)
-    farmData.objects?.forEach(o => {
-      if (o.bigCraftable) {
-        drawSprite('Craftables.png', o.parentSheetIndex, o.x, o.y - 1, 1, 2, 16, 32); // Craftables are 16x32
-      } else {
-        drawSprite('springobjects.png', o.parentSheetIndex, o.x, o.y, 1, 1, 16, 16); // Springobjects are 16x16
-      }
-    });
-
-    // Buildings (using houses.png for Farmhouse, specific files for others)
-    farmData.buildings?.forEach(b => {
-      const type = b.buildingType || b.name;
-      if (type === 'Farmhouse') {
-         // Farmhouse is handled separately below
-         return;
-      }
-
-      const buildingFile = `${type}.png`;
-      if (assets[buildingFile]) {
-        const img = assets[buildingFile];
-        // Most buildings have the visual size equal to the image size.
-        // However, some buildings (like Fish Pond) have different sizes.
-        // We draw the building aligning its bottom-left with the tile coordinate's bottom-left.
-        const drawW = img.width / 16;
-        const drawH = img.height / 16;
-        drawSprite(buildingFile, 0, b.x, b.y + (b.height || drawH) - drawH, drawW, drawH, img.width, img.height);
-      } else {
-        drawTile(b.x, b.y, b.width || 5, b.height || 4, '#b22222', type);
-      }
-    });
-
-    // Greenhouse
-    if (farmData.greenhouse) {
-      const { x, y, unlocked } = farmData.greenhouse;
-      const img = assets['houses.png'];
-      if (img && unlocked) {
-        // SDV-Summary: houses.png, x=160, y=0, w=112, h=160.
-        // Since SDV-Summary crops (160, 0, 272, 160)
-        ctx.drawImage(
-          img,
-          160, 0, 112, 160, // Source
-          x * TILE_SIZE, (y - 4) * TILE_SIZE, 7 * TILE_SIZE, 10 * TILE_SIZE // Dest (Greenhouse is 7x6 logic, but visual is 7x10)
+    // --- Floors first (flooring + hoe dirt), across the whole map ---
+    const flooring = getImg('Flooring.png');
+    if (flooring) {
+      for (const f of farmData.flooring ?? []) {
+        const block = spriteRect(flooring.width, f.type, 64, 64, 64, 64);
+        const vCols = 4; // 64px block -> four 16px views
+        const vx = (f.orientation % vCols) * TILE;
+        const vy = Math.floor(f.orientation / vCols) * TILE;
+        blit(
+          ctx,
+          flooring,
+          { sx: block.sx + vx, sy: block.sy + vy, sw: TILE, sh: TILE },
+          f.x * TILE,
+          f.y * TILE,
         );
-      } else {
-        drawTile(x, y, 7, 6, unlocked ? '#20b2aa' : '#778899', 'Greenhouse');
+      }
+    }
+    const hoeSheet = getImg(season === 'winter' ? 'hoeDirtSnow.png' : 'hoeDirt.png');
+    if (hoeSheet) {
+      for (const h of farmData.hoeDirt ?? []) {
+        blit(ctx, hoeSheet, spriteRect(hoeSheet.width, h.orientation, TILE, TILE, TILE, TILE), h.x * TILE, h.y * TILE);
       }
     }
 
-    // House / Farmhouse
-    const houseData = farmData.house || farmData.buildings?.find(b => b.buildingType === 'Farmhouse' || b.name === 'Farmhouse');
-    if (houseData) {
-      const { x, y, upgradeLevel = 0 } = houseData;
-      const img = assets['houses.png'];
-      if (img) {
-        // SDV-Summary logic:
-        // Index is upgrade level, capped at 2.
-        // Farmhouse is usually at column 0 in houses.png.
-        // Size: 160x144 (10x9 tiles).
-        const level = Math.min(upgradeLevel, 2);
-        ctx.drawImage(
-          img,
-          0, level * 144, 160, 144, // Source
-          x * TILE_SIZE, (y - 5) * TILE_SIZE, 10 * TILE_SIZE, 9 * TILE_SIZE // Dest (visual height is 9, logic might be less)
-        );
-      } else {
-        drawTile(x, y, 9, 6, '#cd5c5c', 'Farmhouse');
+    // --- Everything else, sorted bottom-to-top by tile y ---
+    type Drawable =
+      | { kind: 'crop'; t: CropTile }
+      | { kind: 'object'; t: ObjectTile }
+      | { kind: 'fence'; t: FenceTile }
+      | { kind: 'terrain'; t: TerrainTile }
+      | { kind: 'large'; t: LargeTerrainTile }
+      | { kind: 'clump'; t: ClumpTile }
+      | { kind: 'building'; t: BuildingTile }
+      | { kind: 'house'; t: { x: number; y: number } }
+      | { kind: 'greenhouse'; t: { x: number; y: number } };
+
+    const items: Drawable[] = [
+      ...(farmData.crops ?? []).map((t) => ({ kind: 'crop', t }) as Drawable),
+      ...(farmData.objects ?? []).map((t) => ({ kind: 'object', t }) as Drawable),
+      ...(farmData.fences ?? []).map((t) => ({ kind: 'fence', t }) as Drawable),
+      ...(farmData.terrainFeatures ?? []).map((t) => ({ kind: 'terrain', t }) as Drawable),
+      ...(farmData.largeTerrainFeatures ?? []).map((t) => ({ kind: 'large', t }) as Drawable),
+      ...(farmData.resourceClumps ?? []).map((t) => ({ kind: 'clump', t }) as Drawable),
+      ...(farmData.buildings ?? []).map((t) => ({ kind: 'building', t }) as Drawable),
+    ];
+    if (farmData.house) items.push({ kind: 'house', t: farmData.house });
+    if (farmData.greenhouse) items.push({ kind: 'greenhouse', t: farmData.greenhouse });
+    // Stable sort by tile y so southern sprites overlap northern ones.
+    items.sort((a, b) => a.t.y - b.t.y);
+
+    const houses = getImg('houses.png');
+
+    for (const item of items) {
+      switch (item.kind) {
+        case 'crop':
+          drawCrop(ctx, item.t, getImg('crops.png'));
+          break;
+        case 'object':
+          drawObject(ctx, item.t, getImg('springobjects.png'), getImg('Craftables.png'));
+          break;
+        case 'fence':
+          drawFence(ctx, item.t, getImg, gates);
+          break;
+        case 'terrain':
+          drawTerrain(ctx, item.t, season, getImg, rng);
+          break;
+        case 'large':
+          drawBush(ctx, item.t, season, getImg('bushes.png'));
+          break;
+        case 'clump':
+          drawClump(ctx, item.t, getImg('springobjects.png'));
+          break;
+        case 'building':
+          drawBuilding(ctx, item.t, season, getImg);
+          break;
+        case 'greenhouse':
+          // houses.png: left 160px = farmhouse, next 112px = greenhouse.
+          if (houses) {
+            const gh = farmData.greenhouse;
+            blit(
+              ctx,
+              houses,
+              { sx: 160, sy: (gh.unlocked ? 1 : 0) * 160, sw: 112, sh: 160 },
+              gh.x * TILE,
+              (gh.y - 6) * TILE,
+            );
+          }
+          break;
+        case 'house':
+          if (houses) {
+            const h = farmData.house;
+            const lvl = h.upgradeLevel === 3 ? 2 : Math.min(h.upgradeLevel ?? 0, 2);
+            blit(
+              ctx,
+              houses,
+              { sx: 0, sy: lvl * 144, sw: 160, sh: 144 },
+              h.x * TILE,
+              (h.y - 6) * TILE,
+            );
+          }
+          break;
       }
     }
 
-  }, [farmData, assetsLoaded, assets]);
-
-  // Panning/Zooming handlers
-  const handleWheel = (e: React.WheelEvent) => {
-    if (!containerRef.current) return;
-    
-    // Determine zoom point relative to container
-    const rect = containerRef.current.getBoundingClientRect();
-    const mouseX = e.clientX - rect.left;
-    const mouseY = e.clientY - rect.top;
-
-    const zoomFactor = e.deltaY > 0 ? 0.9 : 1.1;
-    const newScale = Math.max(0.2, Math.min(scale * zoomFactor, 5));
-
-    if (newScale !== scale) {
-      // Adjust offset so we zoom into the mouse position
-      const dx = (mouseX - offset.x) * (newScale / scale - 1);
-      const dy = (mouseY - offset.y) * (newScale / scale - 1);
-      
-      setScale(newScale);
-      setOffset({
-        x: offset.x - dx,
-        y: offset.y - dy
-      });
+    // Deferred gates draw on top of their posts.
+    for (const g of gates) {
+      const file = fenceFile(g.type);
+      const sheet = file ? getImg(file) : null;
+      if (!sheet) continue;
+      const rect = spriteRect(sheet.width, g.orientation, TILE, TILE * 2, 24, TILE * 2);
+      blit(ctx, sheet, rect, g.x * TILE - 4, g.y * TILE - TILE, g.flipped);
     }
-  };
+  }, [farmData, season, showGrid, assetVersion, getImg]);
 
-  const handleMouseDown = (e: React.MouseEvent) => {
-    setIsDragging(true);
-    setDragStart({ x: e.clientX - offset.x, y: e.clientY - offset.y });
-  };
-
-  const handleMouseMove = (e: React.MouseEvent) => {
-    if (!isDragging) return;
+  // --- Interaction ---
+  const onWheel = (e: React.WheelEvent) => {
+    const container = containerRef.current;
+    if (!container) return;
+    const rect = container.getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    const my = e.clientY - rect.top;
+    const factor = e.deltaY > 0 ? 0.9 : 1.1;
+    const next = Math.max(0.2, Math.min(scale * factor, 6));
+    if (next === scale) return;
     setOffset({
-      x: e.clientX - dragStart.x,
-      y: e.clientY - dragStart.y
+      x: mx - (mx - offset.x) * (next / scale),
+      y: my - (my - offset.y) * (next / scale),
     });
+    setScale(next);
   };
 
-  const handleMouseUp = () => {
+  const onMouseDown = (e: React.MouseEvent) => {
+    dragRef.current = { x: e.clientX - offset.x, y: e.clientY - offset.y, active: true };
+    setIsDragging(true);
+  };
+  const onMouseMove = (e: React.MouseEvent) => {
+    if (!dragRef.current.active) return;
+    setOffset({ x: e.clientX - dragRef.current.x, y: e.clientY - dragRef.current.y });
+  };
+  const endDrag = () => {
+    dragRef.current.active = false;
     setIsDragging(false);
   };
 
-  const handleMouseLeave = () => {
-    setIsDragging(false);
-  };
+  const counts = useMemo(() => {
+    if (!farmData) return null;
+    return {
+      buildings: farmData.buildings?.length ?? 0,
+      crops: farmData.crops?.length ?? 0,
+      trees: (farmData.terrainFeatures ?? []).filter((t) => t.name === 'Tree' || t.name === 'FruitTree')
+        .length,
+      objects: farmData.objects?.length ?? 0,
+    };
+  }, [farmData]);
 
-  function getMapBackgroundColor(mapType: string): string {
-    switch (mapType) {
-      case 'Beach': return '#f4a460'; // Sandy brown
-      case 'Riverland': return '#87ceeb'; // Light sky blue
-      case 'Wilderness': return '#2e8b57'; // Dark olive green
-      default: return '#9acd32'; // Yellow green (standard grass)
-    }
-  }
+  const zoomPct = Math.round(scale * 100);
 
   return (
-    <div className="map-view-container" style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
-      <div className="map-view-header" style={{ display: 'flex', gap: '16px', padding: '16px', backgroundColor: 'var(--bg-card)', borderBottom: '2px solid var(--border-color)', alignItems: 'center' }}>
-        <h2 style={{ margin: 0 }}>Farm Map</h2>
-        
-        <select 
-          value={activeSlot || ''} 
-          onChange={(e) => setActiveSlot(e.target.value)}
-          disabled={slots.length === 0}
-          className="stardew-select"
-        >
-          <option value="" disabled>Select a save slot</option>
-          {slots.map(s => (
-            <option key={s} value={s}>{s}</option>
-          ))}
-        </select>
-        
-        <div style={{ flex: 1 }} />
-        
-        <div className="zoom-controls" style={{ display: 'flex', gap: '8px' }}>
-          <button className="secondary-button" onClick={() => setScale(s => Math.max(0.2, s * 0.8))}>Zoom Out</button>
-          <span style={{ display: 'flex', alignItems: 'center', fontFamily: 'monospace' }}>{Math.round(scale * 100)}%</span>
-          <button className="secondary-button" onClick={() => setScale(s => Math.min(5, s * 1.2))}>Zoom In</button>
+    <div className="mapview">
+      <header className="mapview-toolbar">
+        <div className="mapview-title">
+          <span className="mapview-title-icon" aria-hidden>🗺️</span>
+          <div>
+            <h2>Farm Map</h2>
+            <p>Live render from the save parser</p>
+          </div>
         </div>
-      </div>
 
-      <div 
-        className="map-canvas-container" 
+        <div className="mapview-controls">
+          <label className="mapview-field">
+            <span>Save slot</span>
+            <select
+              className="stardew-select"
+              value={activeSlot ?? ''}
+              onChange={(e) => setActiveSlot(e.target.value)}
+              disabled={slots.length === 0}
+            >
+              {slots.length === 0 && <option value="">No saves found</option>}
+              {slots.map((s) => (
+                <option key={s} value={s}>
+                  {s}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <label className="mapview-field">
+            <span>Season</span>
+            <select
+              className="stardew-select"
+              value={season}
+              onChange={(e) => {
+                setAutoSeason(false);
+                setSeason(e.target.value as Season);
+              }}
+            >
+              {SEASONS.map((s) => (
+                <option key={s} value={s}>
+                  {s[0].toUpperCase() + s.slice(1)}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <button
+            type="button"
+            className={`mapview-toggle ${showGrid ? 'is-active' : ''}`}
+            onClick={() => setShowGrid((g) => !g)}
+            aria-pressed={showGrid}
+          >
+            {showGrid ? 'Grid on' : 'Grid off'}
+          </button>
+        </div>
+      </header>
+
+      <div
+        className="mapview-stage"
         ref={containerRef}
-        style={{ 
-          flex: 1, 
-          overflow: 'hidden', 
-          position: 'relative',
-          backgroundColor: '#1a1a1a', // Dark background for the canvas container
-          cursor: isDragging ? 'grabbing' : 'grab'
-        }}
-        onWheel={handleWheel}
-        onMouseDown={handleMouseDown}
-        onMouseMove={handleMouseMove}
-        onMouseUp={handleMouseUp}
-        onMouseLeave={handleMouseLeave}
+        onWheel={onWheel}
+        onMouseDown={onMouseDown}
+        onMouseMove={onMouseMove}
+        onMouseUp={endDrag}
+        onMouseLeave={endDrag}
+        style={{ cursor: isDragging ? 'grabbing' : farmData ? 'grab' : 'default' }}
       >
         {loading && (
-          <div style={{ position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%, -50%)', color: 'white', backgroundColor: 'rgba(0,0,0,0.7)', padding: '16px', borderRadius: '8px', zIndex: 10 }}>
-            Loading map data...
+          <div className="mapview-overlay">
+            <div className="mapview-spinner" aria-hidden />
+            <p>Loading farm…</p>
           </div>
         )}
-        
-        {error && (
-          <div style={{ position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%, -50%)', color: 'var(--danger)', backgroundColor: 'rgba(0,0,0,0.8)', padding: '16px', borderRadius: '8px', zIndex: 10 }}>
-            {error}
+
+        {!loading && error && (
+          <div className="mapview-overlay mapview-overlay-error">
+            <span className="mapview-overlay-icon" aria-hidden>⚠️</span>
+            <p>{error}</p>
+            <button type="button" onClick={() => activeSlot && setActiveSlot(activeSlot)}>
+              Retry
+            </button>
           </div>
         )}
 
         {!loading && !error && !farmData && (
-          <div style={{ position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%, -50%)', color: '#888' }}>
-            No map data available. Select a save slot.
+          <div className="mapview-overlay">
+            <span className="mapview-overlay-icon" aria-hidden>🌱</span>
+            <p>No farm loaded yet. Pick a save slot to render the map.</p>
           </div>
         )}
 
-        <canvas 
+        <canvas
           ref={canvasRef}
+          className="mapview-canvas"
           style={{
-            position: 'absolute',
-            transformOrigin: '0 0',
             transform: `translate(${offset.x}px, ${offset.y}px) scale(${scale})`,
-            imageRendering: 'pixelated', // Keep it sharp!
-            boxShadow: '0 0 20px rgba(0,0,0,0.5)'
+            visibility: farmData ? 'visible' : 'hidden',
           }}
         />
-        
-        {/* Legend Overlay */}
+
         {farmData && (
-          <div style={{ 
-            position: 'absolute', 
-            bottom: '16px', 
-            left: '16px', 
-            backgroundColor: 'var(--bg-card)', 
-            padding: '12px', 
-            border: '2px solid var(--border-color)',
-            borderRadius: '4px',
-            display: 'flex',
-            flexDirection: 'column',
-            gap: '8px',
-            fontSize: '14px'
-          }}>
-            <div style={{fontWeight: 'bold', borderBottom: '1px solid var(--border-color)', paddingBottom: '4px', marginBottom: '4px'}}>Legend</div>
-            <div style={{display: 'flex', alignItems: 'center', gap: '8px'}}><div style={{width: 12, height: 12, backgroundColor: '#cd5c5c'}}></div> Farmhouse</div>
-            <div style={{display: 'flex', alignItems: 'center', gap: '8px'}}><div style={{width: 12, height: 12, backgroundColor: '#20b2aa'}}></div> Greenhouse</div>
-            <div style={{display: 'flex', alignItems: 'center', gap: '8px'}}><div style={{width: 12, height: 12, backgroundColor: '#b22222'}}></div> Buildings</div>
-            <div style={{display: 'flex', alignItems: 'center', gap: '8px'}}><div style={{width: 12, height: 12, backgroundColor: '#2ecc71'}}></div> Crops</div>
-            <div style={{display: 'flex', alignItems: 'center', gap: '8px'}}><div style={{width: 12, height: 12, backgroundColor: '#654321'}}></div> Tilled Dirt</div>
+          <div className="mapview-zoom">
+            <button type="button" onClick={() => setScale((s) => Math.max(0.2, s * 0.8))} aria-label="Zoom out">
+              −
+            </button>
+            <span>{zoomPct}%</span>
+            <button type="button" onClick={() => setScale((s) => Math.min(6, s * 1.25))} aria-label="Zoom in">
+              +
+            </button>
+            <button type="button" className="mapview-zoom-fit" onClick={fitToScreen}>
+              Fit
+            </button>
+          </div>
+        )}
+
+        {farmData && counts && (
+          <div className="mapview-info">
+            <div className="mapview-info-row">
+              <span className="mapview-info-label">Map</span>
+              <span className="mapview-info-value">{farmData.mapType}</span>
+            </div>
+            <div className="mapview-info-stats">
+              <div>
+                <strong>{counts.buildings}</strong>
+                <span>Buildings</span>
+              </div>
+              <div>
+                <strong>{counts.crops}</strong>
+                <span>Crops</span>
+              </div>
+              <div>
+                <strong>{counts.trees}</strong>
+                <span>Trees</span>
+              </div>
+              <div>
+                <strong>{counts.objects}</strong>
+                <span>Objects</span>
+              </div>
+            </div>
           </div>
         )}
       </div>
     </div>
   );
+}
+
+// ---------------------------------------------------------------------------
+// Per-feature renderers (ports of generateFarm branches)
+// ---------------------------------------------------------------------------
+
+function fenceFile(type: number): string | null {
+  if (type === 1) return 'Fence1.png';
+  if (type === 2) return 'Fence2.png';
+  if (type === 3) return 'Fence3.png';
+  if (type === 5) return 'Fence5.png';
+  return 'Fence1.png';
+}
+
+function drawCrop(ctx: CanvasRenderingContext2D, t: CropTile, sheet: HTMLImageElement | null) {
+  if (!sheet) return;
+  // crops.png: each crop type is a 128x32 strip; phases are 16-wide columns.
+  const strip = spriteRect(sheet.width, t.rowInSpriteSheet, 128, 32, 128, 32);
+  const isFlower = [26, 27, 28, 29, 31].includes(t.rowInSpriteSheet);
+
+  let img: CanvasImageSource = sheet;
+  let rect: SpriteRect;
+
+  if (!isFlower || !t.tint) {
+    const local = spriteRect(128, t.currentPhase, TILE, 32, TILE, 32);
+    rect = { sx: strip.sx + local.sx, sy: strip.sy + local.sy, sw: TILE, sh: 32 };
+  } else {
+    // Blooming flowers composite a tinted head over the body.
+    const days = t.tint.daysOfCurrentPhase;
+    const T = t.rowInSpriteSheet;
+    const bloomed =
+      (T === 26 && days > 1) ||
+      (T === 27 && days > 2) ||
+      (T === 28 && days > 2) ||
+      (T === 29 && days > 2) ||
+      (T === 31 && days > 3);
+
+    if (t.currentPhase < 4) {
+      const local = spriteRect(128, t.currentPhase, TILE, 32, TILE, 32);
+      rect = { sx: strip.sx + local.sx, sy: strip.sy + local.sy, sw: TILE, sh: 32 };
+    } else {
+      const off = document.createElement('canvas');
+      off.width = TILE;
+      off.height = 32;
+      const octx = off.getContext('2d')!;
+      const bodyLocal = spriteRect(128, bloomed ? 5 : 4, TILE, 32, TILE, 32);
+      octx.drawImage(
+        sheet,
+        strip.sx + bodyLocal.sx,
+        strip.sy + bodyLocal.sy,
+        TILE,
+        32,
+        0,
+        0,
+        TILE,
+        32,
+      );
+      if (bloomed) {
+        const headLocal = spriteRect(128, 6, TILE, 32, TILE, 32);
+        const head = tintSprite(
+          sheet,
+          { sx: strip.sx + headLocal.sx, sy: strip.sy + headLocal.sy, sw: TILE, sh: 32 },
+          t.tint.rgb,
+        );
+        octx.drawImage(head, 0, 0);
+      }
+      img = off;
+      rect = { sx: 0, sy: 0, sw: TILE, sh: 32 };
+    }
+  }
+  blit(ctx, img, rect, t.x * TILE, t.y * TILE - TILE, t.flipped);
+}
+
+function drawObject(
+  ctx: CanvasRenderingContext2D,
+  t: ObjectTile,
+  objects: HTMLImageElement | null,
+  craftables: HTMLImageElement | null,
+) {
+  const isChest =
+    typeof t.extra === 'object' && t.extra !== null && Array.isArray(t.extra.tint) && t.extra.tint.length === 3;
+
+  if (isChest && craftables) {
+    const extra = t.extra as { name: string; tint: number[] };
+    let tint = extra.tint;
+    if (extra.name === 'Chest' && tint[0] === 0 && tint[1] === 0 && tint[2] === 0) {
+      tint = [211, 139, 71];
+    }
+    const bodyRect = spriteRect(craftables.width, 168, TILE, 32, TILE, 32);
+    const body = tintSprite(craftables, bodyRect, tint);
+    const overlayRect = spriteRect(craftables.width, 176, TILE, 32, TILE, 32);
+    const octx = body.getContext('2d')!;
+    octx.drawImage(craftables, overlayRect.sx, overlayRect.sy, TILE, 32, 0, 0, TILE, 32);
+    blit(ctx, body, { sx: 0, sy: 0, sw: TILE, sh: 32 }, t.x * TILE, t.y * TILE - 16, t.flipped);
+    return;
+  }
+
+  const craftable = t.type === 'Crafting' && !CRAFTABLE_BLACKLIST.has(t.displayName);
+  if (craftable && craftables) {
+    const rect = spriteRect(craftables.width, t.index, TILE, 32, TILE, 32);
+    blit(ctx, craftables, rect, t.x * TILE, t.y * TILE - 16, t.flipped);
+  } else if (objects) {
+    const rect = spriteRect(objects.width, t.index, TILE, TILE, TILE, TILE);
+    blit(ctx, objects, rect, t.x * TILE, t.y * TILE, t.flipped);
+  }
+}
+
+function drawFence(
+  ctx: CanvasRenderingContext2D,
+  t: FenceTile,
+  getImg: (file: string) => HTMLImageElement | null,
+  gates: FenceTile[],
+) {
+  if (t.orientation === 12 && t.isGate) {
+    gates.push(t); // closed gate, drawn after the loop
+    return;
+  }
+  const file = fenceFile(t.type);
+  const sheet = file ? getImg(file) : null;
+  if (!sheet) return;
+
+  let offsetX = 0;
+  let rect: SpriteRect;
+  if (t.orientation === 15 && t.isGate) {
+    rect = spriteRect(sheet.width, t.orientation, TILE, TILE * 2, 8, TILE);
+    offsetX = 5;
+  } else {
+    rect = spriteRect(sheet.width, t.orientation, TILE, TILE * 2, TILE, TILE * 2);
+  }
+  blit(ctx, sheet, rect, t.x * TILE + offsetX, t.y * TILE - TILE, t.flipped);
+}
+
+function drawClump(ctx: CanvasRenderingContext2D, t: ClumpTile, objects: HTMLImageElement | null) {
+  if (!objects) return;
+  const rect = spriteRect(objects.width, t.parentSheetIndex, TILE, TILE, 32, 32);
+  blit(ctx, objects, rect, t.x * TILE, t.y * TILE);
+}
+
+function drawBush(
+  ctx: CanvasRenderingContext2D,
+  t: LargeTerrainTile,
+  season: Season,
+  bushes: HTMLImageElement | null,
+) {
+  if (!bushes) return;
+  // Port of generateFarm's "Bush" branch. `size` (0/1/2) selects the sprite
+  // footprint; `tileSheetOffset` is the animation/variant offset.
+  const size = Math.max(0, Math.min(t.size, 2));
+  const variant = t.tileSheetOffset ?? 0;
+  const sizes: [number, number][] = [
+    [TILE, 32],
+    [32, 48],
+    [48, 48],
+  ];
+  const [w, h] = sizes[size];
+
+  let seasonOffset = 0;
+  if (size === 0) {
+    seasonOffset = { spring: 0, summer: 2, fall: 4, winter: 6 }[season];
+  } else if (size === 1) {
+    if (season === 'summer') seasonOffset = 4 + variant * 2;
+    else if (season === 'fall') seasonOffset = 8 * 3;
+    else if (season === 'winter') seasonOffset = 8 * 3 + 4;
+  } else if (size === 2) {
+    if (season === 'fall') seasonOffset = 3;
+    else if (season === 'winter') seasonOffset = 8 * 3;
+  }
+
+  const base = [8 * 14, 8 * 0, 8 * 8][size];
+  const index = base + seasonOffset;
+  const rect = spriteRect(bushes.width, index, TILE, h, w, h);
+  blit(ctx, bushes, rect, t.x * TILE, t.y * TILE - h + TILE, t.flipped);
+}
+
+function drawTerrain(
+  ctx: CanvasRenderingContext2D,
+  t: TerrainTile,
+  season: Season,
+  getImg: (file: string) => HTMLImageElement | null,
+  rng: () => number,
+) {
+  if (t.name === 'Tree') {
+    drawTree(ctx, t, season, getImg);
+  } else if (t.name === 'FruitTree') {
+    drawFruitTree(ctx, t, season, getImg('fruitTrees.png'));
+  } else if (t.name === 'Grass') {
+    drawGrass(ctx, t, season, getImg('grass.png'), rng);
+  } else if (t.name === 'Tea_Bush') {
+    drawTeaBushTerrain(ctx, t, season, getImg('bushes.png'));
+  }
+}
+
+function drawTeaBushTerrain(
+  ctx: CanvasRenderingContext2D,
+  t: TerrainTile,
+  season: Season,
+  bushes: HTMLImageElement | null,
+) {
+  if (!bushes) return;
+  const growth = t.growthStage ?? 0;
+  const seasonOffsetX = season === 'summer' || season === 'winter' ? 64 : 0;
+  const seasonOffsetY = season === 'fall' || season === 'winter' ? 32 : 0;
+  const sheetX = seasonOffsetX + growth * 16;
+  const index = Math.floor(sheetX / 16 + ((256 + seasonOffsetY) / 32) * 8);
+  const rect = spriteRect(bushes.width, index, TILE, 32, TILE, 32);
+  blit(ctx, bushes, rect, t.x * TILE, t.y * TILE, t.flipped);
+}
+
+function drawTree(
+  ctx: CanvasRenderingContext2D,
+  t: TerrainTile,
+  season: Season,
+  getImg: (file: string) => HTMLImageElement | null,
+) {
+  const type = t.treeType ?? 1;
+  const fileFn = TREE_FILES[type];
+  if (!fileFn) return;
+  const sheet = getImg(fileFn(season));
+  if (!sheet) return;
+  const growth = t.growthStage ?? 5;
+
+  if (growth >= 5) {
+    // Full tree: composite trunk + canopy (port of loadTree).
+    const off = document.createElement('canvas');
+    off.width = 48;
+    off.height = 96;
+    const octx = off.getContext('2d')!;
+    const stump = spriteRect(sheet.width, 20, TILE, TILE, TILE, 32);
+    octx.drawImage(sheet, stump.sx, stump.sy, TILE, 32, TILE, 64, TILE, 32);
+    octx.drawImage(sheet, 0, 0, 48, 96, 0, 0, 48, 96);
+    const img = t.flipped ? flipCanvas(off) : off;
+    ctx.drawImage(img, t.x * TILE - TILE, t.y * TILE - 80);
+    return;
+  }
+
+  let rect: SpriteRect;
+  let offsetY = 0;
+  if (growth === 0) rect = spriteRect(sheet.width, 26, TILE, TILE, TILE, TILE);
+  else if (growth === 1) rect = spriteRect(sheet.width, 24, TILE, TILE, TILE, TILE);
+  else if (growth === 2) rect = spriteRect(sheet.width, 25, TILE, TILE, TILE, TILE);
+  else {
+    rect = spriteRect(sheet.width, 18, TILE, TILE, TILE, 32);
+    offsetY = 16;
+  }
+  blit(ctx, sheet, rect, t.x * TILE, t.y * TILE - offsetY, t.flipped);
+}
+
+function drawFruitTree(
+  ctx: CanvasRenderingContext2D,
+  t: TerrainTile,
+  season: Season,
+  sheet: HTMLImageElement | null,
+) {
+  if (!sheet) return;
+  const type = t.treeType ?? 0;
+  const growth = t.growthStage ?? 4;
+  const seasonIdx = { spring: 0, summer: 1, fall: 2, winter: 3 }[season];
+  const index = growth <= 3 ? growth + 1 + 9 * type : 4 + seasonIdx + 9 * type;
+  const rect = spriteRect(sheet.width, index, 48, 80, 48, 80);
+  blit(ctx, sheet, rect, t.x * TILE - TILE, t.y * TILE - 64, t.flipped);
+}
+
+function drawGrass(
+  ctx: CanvasRenderingContext2D,
+  t: TerrainTile,
+  season: Season,
+  sheet: HTMLImageElement | null,
+  rng: () => number,
+) {
+  if (!sheet || season === 'winter') return; // no winter grass sprite
+  const base = { spring: 0, summer: 4, fall: 8 }[season];
+  const tufts = t.numberOfWeeds ?? 0;
+  for (let i = 0; i < tufts; i++) {
+    const idx = base + randInt(rng, 0, 2);
+    const rect = spriteRect(sheet.width, idx, TILE, 20, TILE, 20);
+    const offY = 8 + (2 & i) * 4 - 16 + randInt(rng, -2, 2);
+    const offX = 12 + (1 & i) * 8 - 16 + randInt(rng, -2, 2);
+    blit(ctx, sheet, rect, t.x * TILE + offX, t.y * TILE + offY);
+  }
+}
+
+function drawBuilding(
+  ctx: CanvasRenderingContext2D,
+  t: BuildingTile,
+  season: Season,
+  getImg: (file: string) => HTMLImageElement | null,
+) {
+  const type = t.buildingType;
+  const lower = type.toLowerCase();
+  if (lower === 'farmhouse' || lower === 'house') return; // handled by house field
+
+  if (lower === 'fish pond' && t.fishPond) {
+    const sheet = getImg('Fish Pond.png');
+    if (!sheet) return;
+    const pond = renderFishPond(sheet, t.fishPond);
+    ctx.drawImage(pond, t.x * TILE, t.y * TILE - 32);
+    return;
+  }
+
+  if (lower === 'junimo hut') {
+    const sheet = getImg('Junimo Hut.png');
+    if (!sheet) return;
+    // Seasonal: each season is a 48-wide column.
+    const col = SEASONS.indexOf(season);
+    const offsetY = 64 - t.height * TILE;
+    ctx.drawImage(sheet, col * 48, 0, 48, 64, t.x * TILE, t.y * TILE - offsetY, 48, 64);
+    return;
+  }
+
+  const sheet = getImg(`${type}.png`);
+  if (!sheet) return;
+  const offsetY = sheet.height - t.height * TILE;
+
+  if (lower.includes('cabin')) {
+    // Cabin sheets hold upgrade columns of width (tilesWide * 16).
+    const colW = t.width * TILE;
+    const upgrade = t.upgradeLevel ?? 0;
+    ctx.drawImage(
+      sheet,
+      upgrade * colW,
+      0,
+      colW,
+      sheet.height,
+      t.x * TILE,
+      t.y * TILE - offsetY,
+      colW,
+      sheet.height,
+    );
+    return;
+  }
+
+  ctx.drawImage(sheet, t.x * TILE, t.y * TILE - offsetY);
+}
+
+/** Port of buildings/fish_pond.render_fish_pond. */
+function renderFishPond(
+  sheet: HTMLImageElement,
+  pond: { nettingStyle: number; waterColor: number[]; hasOutput: boolean },
+): HTMLCanvasElement {
+  const out = document.createElement('canvas');
+  out.width = 5 * TILE;
+  out.height = 7 * TILE;
+  const octx = out.getContext('2d')!;
+
+  // Tinted water body.
+  const water = tintSprite(sheet, { sx: 0, sy: 5 * TILE, sw: 5 * TILE, sh: 5 * TILE }, pond.waterColor);
+  octx.drawImage(water, 0, 2 * TILE);
+
+  // Water detail + base frame (untinted).
+  octx.drawImage(sheet, TILE, 10 * TILE, 3 * TILE, TILE, TILE, 3 * TILE, 3 * TILE, TILE);
+  octx.drawImage(sheet, 0, 0, 5 * TILE, 5 * TILE, 0, 2 * TILE, 5 * TILE, 5 * TILE);
+
+  if (pond.hasOutput) {
+    octx.drawImage(sheet, 0, 10 * TILE, TILE, TILE, 4 * TILE + 1, 5 * TILE + 11, TILE, TILE);
+  }
+
+  if ([0, 1, 2].includes(pond.nettingStyle)) {
+    const h = 3 * TILE;
+    const y = pond.nettingStyle * h;
+    octx.drawImage(sheet, 5 * TILE, y, 5 * TILE, h, 0, 0, 5 * TILE, h);
+  }
+  return out;
+}
+
+function flipCanvas(src: HTMLCanvasElement): HTMLCanvasElement {
+  const out = document.createElement('canvas');
+  out.width = src.width;
+  out.height = src.height;
+  const octx = out.getContext('2d')!;
+  octx.translate(src.width, 0);
+  octx.scale(-1, 1);
+  octx.drawImage(src, 0, 0);
+  return out;
 }
