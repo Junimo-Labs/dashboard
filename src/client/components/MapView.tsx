@@ -450,6 +450,8 @@ export function MapView({ slotId }: MapViewProps) {
     // Stable sort by tile y so southern sprites overlap northern ones.
     items.sort((a, b) => a.t.y - b.t.y);
 
+    // houses.png (1.6): three farmhouse upgrade levels stacked vertically,
+    // 160x144 each. The greenhouse lives in its own Greenhouse.png sheet.
     const houses = getImg('houses.png');
 
     for (const item of items) {
@@ -476,16 +478,20 @@ export function MapView({ slotId }: MapViewProps) {
           drawBuilding(ctx, item.t, season, getImg);
           break;
         case 'greenhouse':
-          // houses.png: left 160px = farmhouse, next 112px = greenhouse.
-          if (houses) {
-            const gh = farmData.greenhouse;
-            blit(
-              ctx,
-              houses,
-              { sx: 160, sy: (gh.unlocked ? 1 : 0) * 160, sw: 112, sh: 160 },
-              gh.x * TILE,
-              (gh.y - 6) * TILE,
-            );
+          // 1.6 layout: Greenhouse.png is its own sheet, stacked vertically —
+          // top 112x160 = broken/locked, bottom 112x160 = intact/unlocked.
+          {
+            const ghSheet = getImg('Greenhouse.png');
+            if (ghSheet) {
+              const gh = farmData.greenhouse;
+              blit(
+                ctx,
+                ghSheet,
+                { sx: 0, sy: gh.unlocked ? 160 : 0, sw: 112, sh: 160 },
+                gh.x * TILE,
+                (gh.y - 6) * TILE,
+              );
+            }
           }
           break;
         case 'house':
@@ -1028,6 +1034,25 @@ function drawBuilding(
       t.x * TILE,
       t.y * TILE - offsetY,
       colW,
+      sheet.height,
+    );
+    return;
+  }
+
+  // Some buildings (e.g. Mill) pack animation frames to the right of the base
+  // sprite. When the sheet is wider than the tile footprint, only draw the
+  // leftmost footprint-width columns so the extra frames aren't tiled in.
+  const footprintW = t.width * TILE;
+  if (footprintW > 0 && sheet.width > footprintW) {
+    ctx.drawImage(
+      sheet,
+      0,
+      0,
+      footprintW,
+      sheet.height,
+      t.x * TILE,
+      t.y * TILE - offsetY,
+      footprintW,
       sheet.height,
     );
     return;
